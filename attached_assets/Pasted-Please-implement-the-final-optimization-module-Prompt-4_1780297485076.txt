@@ -1,0 +1,20 @@
+Please implement the final optimization module (Prompt 4): Asynchronous / Multi-threading Scanner and Browser Resource Management. 
+
+Since the newly upgraded `crawler.ts` now successfully discovers a large volume of dynamic URLs (e.g., 65+ endpoints on mealmate.io.vn), executing deep XSS and SQLi scans sequentially will consume excessive memory and time, potentially crashing the Replit container.
+
+Here are the specific technical requirements for this optimization:
+
+1. Browser Context Re-use & Resource Pooling:
+- Instead of launching a brand new browser instance for every single page request during the crawl/scan phase, optimize Puppeteer to use a single Browser Instance with multiple isolated Browser Contexts (`browser.createBrowserContext()`).
+- Implement an explicit concurrency limit (e.g., maximum 5 parallel pages/tasks running concurrently) to prevent CPU/RAM spikes on the server.
+
+2. Asynchronous Injection Pipeline:
+- Rewrite the scanning queue using asynchronous task scheduling (e.g., using a worker queue pattern or `Promise.all` with a strict concurrency limiter like `p-limit` if in NodeJS/TypeScript).
+- Ensure that the SQLi and XSS payloads are fired in parallel batches against the discovered `urlsWithParams` and `forms`, adhering strictly to the user's defined concurrency cap.
+
+3. Real-Time WebSocket/Event Progress Updates:
+- Implement a progress tracking mechanism. As the batch scanner processes the targets, emit real-time progress percentages or status text (e.g., "Scanning target 15/65: /dishes/69a03cc97c...") to the Frontend.
+- The Frontend should handle this data to render a dynamic Progress Bar and a live logging console, letting the user know exactly what the scanner is doing without refreshing the page.
+
+4. Graceful Timeout & Error Handling:
+- Set a strict network/response timeout (maximum 5000ms) for each injection test. If a URL hangs (especially during Time-Based SQLi tests), ensure it logs the finding (if it matches the sleep criteria) or safely aborts the request without blocking the rest of the queue.

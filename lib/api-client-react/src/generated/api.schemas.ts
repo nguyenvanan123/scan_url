@@ -90,6 +90,8 @@ export type ScanResultCrawlSummary = {
   urls?: string[];
   jsFiles?: string[];
   errors?: string[];
+  /** Number of HTML forms discovered during crawl — used for Stored XSS testing */
+  formsFound?: number;
 } | null;
 
 export interface ScanResult {

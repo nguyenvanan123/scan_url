@@ -58,7 +58,8 @@ export const ListScansResponseItem = zod.object({
   "urlsWithParams": zod.array(zod.string()).optional(),
   "urls": zod.array(zod.string()).optional(),
   "jsFiles": zod.array(zod.string()).optional(),
-  "errors": zod.array(zod.string()).optional()
+  "errors": zod.array(zod.string()).optional(),
+  "formsFound": zod.number().optional().describe('Number of HTML forms discovered during crawl — used for Stored XSS testing')
 }).nullish()
 }).optional(),
   "errorMessage": zod.string().nullish(),
@@ -122,7 +123,8 @@ export const GetScanResponse = zod.object({
   "urlsWithParams": zod.array(zod.string()).optional(),
   "urls": zod.array(zod.string()).optional(),
   "jsFiles": zod.array(zod.string()).optional(),
-  "errors": zod.array(zod.string()).optional()
+  "errors": zod.array(zod.string()).optional(),
+  "formsFound": zod.number().optional().describe('Number of HTML forms discovered during crawl — used for Stored XSS testing')
 }).nullish()
 }).optional(),
   "errorMessage": zod.string().nullish(),
@@ -188,7 +190,8 @@ export const GetScanStatsResponse = zod.object({
   "urlsWithParams": zod.array(zod.string()).optional(),
   "urls": zod.array(zod.string()).optional(),
   "jsFiles": zod.array(zod.string()).optional(),
-  "errors": zod.array(zod.string()).optional()
+  "errors": zod.array(zod.string()).optional(),
+  "formsFound": zod.number().optional().describe('Number of HTML forms discovered during crawl — used for Stored XSS testing')
 }).nullish()
 }).optional(),
   "errorMessage": zod.string().nullish(),

@@ -254,6 +254,9 @@ components:
               type: array
               items:
                 type: string
+            formsFound:
+              type: integer
+              description: "Number of HTML forms discovered during crawl — used for Stored XSS testing"
 
     Scan:
       type: object
