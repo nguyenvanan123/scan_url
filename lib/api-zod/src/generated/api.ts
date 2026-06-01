@@ -34,7 +34,8 @@ export const ListScansResponseItem = zod.object({
   "status": zod.enum(['pass', 'fail', 'warning', 'info']),
   "description": zod.string(),
   "detail": zod.string().nullish(),
-  "recommendation": zod.string().nullish()
+  "recommendation": zod.string().nullish(),
+  "execution_poc": zod.string().nullish().describe('Step-by-step proof-of-concept: how an attacker or tester would verify and exploit this finding, including commands (curl, Burp Suite, browser) and expected outcome.')
 })),
   "summary": zod.object({
   "total": zod.number(),
@@ -88,7 +89,8 @@ export const GetScanResponse = zod.object({
   "status": zod.enum(['pass', 'fail', 'warning', 'info']),
   "description": zod.string(),
   "detail": zod.string().nullish(),
-  "recommendation": zod.string().nullish()
+  "recommendation": zod.string().nullish(),
+  "execution_poc": zod.string().nullish().describe('Step-by-step proof-of-concept: how an attacker or tester would verify and exploit this finding, including commands (curl, Burp Suite, browser) and expected outcome.')
 })),
   "summary": zod.object({
   "total": zod.number(),
@@ -145,7 +147,8 @@ export const GetScanStatsResponse = zod.object({
   "status": zod.enum(['pass', 'fail', 'warning', 'info']),
   "description": zod.string(),
   "detail": zod.string().nullish(),
-  "recommendation": zod.string().nullish()
+  "recommendation": zod.string().nullish(),
+  "execution_poc": zod.string().nullish().describe('Step-by-step proof-of-concept: how an attacker or tester would verify and exploit this finding, including commands (curl, Burp Suite, browser) and expected outcome.')
 })),
   "summary": zod.object({
   "total": zod.number(),

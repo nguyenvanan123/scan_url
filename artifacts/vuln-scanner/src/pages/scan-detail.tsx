@@ -151,6 +151,39 @@ function FindingCard({ finding }: FindingCardProps) {
               </div>
             </div>
           )}
+
+          {finding.execution_poc && (
+            <div>
+              <div className="flex items-center gap-2 mb-1.5">
+                <div className="text-[10px] font-mono font-bold text-amber-500 dark:text-amber-400 uppercase tracking-widest">
+                  PoC / How to Exploit
+                </div>
+                <div className="h-px flex-1 bg-amber-500/20 dark:bg-amber-400/20" />
+                <div className="text-[9px] font-mono text-amber-600/60 dark:text-amber-400/50 uppercase">
+                  for authorised testing only
+                </div>
+              </div>
+              <div className="relative rounded overflow-hidden border border-amber-500/20 dark:border-amber-400/15">
+                <div className="absolute top-0 left-0 right-0 h-6 bg-[#1e1e1e] flex items-center px-3 gap-1.5">
+                  <div className="w-2.5 h-2.5 rounded-full bg-red-500/70" />
+                  <div className="w-2.5 h-2.5 rounded-full bg-yellow-500/70" />
+                  <div className="w-2.5 h-2.5 rounded-full bg-green-500/70" />
+                  <span className="ml-1 text-[9px] font-mono text-zinc-500">bash</span>
+                </div>
+                <pre className="pt-8 pb-3 px-4 bg-[#1e1e1e] text-xs font-mono overflow-x-auto whitespace-pre leading-relaxed">
+                  <code className="text-zinc-200">{finding.execution_poc.split("\n").map((line: string, i: number) => {
+                    if (line.startsWith("#")) {
+                      return <span key={i} className="text-zinc-500">{line}{"\n"}</span>;
+                    }
+                    if (line.startsWith("curl") || line.startsWith("sqlmap") || line.startsWith("dig") || line.startsWith("nslookup") || line.startsWith("openssl") || line.startsWith("swaks") || line.startsWith("hashcat") || line.startsWith("git-dumper") || line.startsWith("arpspoof") || line.startsWith("mitmproxy") || line.startsWith("tcpdump") || line.startsWith("sslstrip") || line.startsWith("nc ") || line.startsWith("certbot") || line.startsWith("pip ") || line.startsWith("mysql") || line.startsWith("psql")) {
+                      return <span key={i} className="text-emerald-400">{line}{"\n"}</span>;
+                    }
+                    return <span key={i}>{line}{"\n"}</span>;
+                  })}</code>
+                </pre>
+              </div>
+            </div>
+          )}
         </div>
       )}
     </div>
