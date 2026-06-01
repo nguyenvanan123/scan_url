@@ -1,0 +1,26 @@
+Please expand the Puppeteer backend core to act as an "Automated Intelligent Agent" that replaces manual human testing actions. Upgrade Method B ("Inject via Automated Testing Browser") with the following advanced automation capabilities:
+
+1. Human-Like UI Interaction & Form Automation:
+- Instead of just opening the URL passively, the Puppeteer instance must be able to automatically locate input fields (selectors for email, username, password, login buttons) on the target site.
+- Implement automated typing simulation using `page.type()` with a random delay between 50ms to 150ms per character to mimic real human keystrokes.
+- Program the bot to automatically click the login/submit buttons and handle state transitions.
+
+2. State-Driven Conditional Logic:
+- The bot must actively monitor the target browser's state changes. Implement `page.waitForNavigation()` and event listeners to detect if a login action results in a successful authentication, an error message, or a redirect.
+- If a login wall or security challenge (like basic auth or explicit multi-step forms) is detected, the bot must log the exact step to the Attacker C2 Terminal (e.g., "[*] Bot navigating multi-step auth: Step 1 completed, waiting for token injection...").
+
+3. Local Headed Mode Toggle (For VS Code Environment):
+- In the backend configuration file (e.g., server.js or puppeteer-config.js), export a clear configuration object allowing easy toggling between headless and headed mode.
+- Add a comment: '// Change to false when running locally in VS Code to watch the bot execute actions in real-time'.
+- Example structure:
+  const puppeteerConfig = {
+    headless: process.env.NODE_ENV === 'production' ? true : false, // Auto-headed on local VS Code
+    args: ['--no-sandbox', '--disable-setuid-sandbox']
+  };
+
+4. Real-Time Event Streaming to Terminal:
+- Every action performed by the automated bot must stream a live status log to the frontend terminal UI using WebSockets/Server-Sent Events:
+  * "[*] Bot Action: Navigating to live target targetUrl..."
+  * "[*] Bot Action: Simulating human keystrokes into login fields..."
+  * "[+] Bot Action: Clicked submit button. Waiting for response..."
+  * "[!] Bot Action: Session successfully hijacked and synchronized."
