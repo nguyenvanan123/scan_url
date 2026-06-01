@@ -1,11 +1,12 @@
+import { useState } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
 import { Link, useLocation } from "wouter";
 import { formatDistanceToNow } from "date-fns";
-import { 
-  ShieldAlert, ShieldCheck, Activity, Target, Clock, 
-  Trash2, AlertTriangle, ArrowRight, Loader2
+import {
+  ShieldAlert, ShieldCheck, Activity, Target, Clock,
+  Trash2, AlertTriangle, Loader2, Scan
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -17,25 +18,32 @@ import { Badge } from "@/components/ui/badge";
 import { useToast } from "@/hooks/use-toast";
 import { Skeleton } from "@/components/ui/skeleton";
 import {
-  Table,
-  TableBody,
-  TableCell,
-  TableHead,
-  TableHeader,
-  TableRow,
+  Table, TableBody, TableCell,
+  TableHead, TableHeader, TableRow,
 } from "@/components/ui/table";
 
-import { 
-  useListScans, 
-  useCreateScan, 
-  useDeleteScan, 
+import {
+  useListScans,
+  useCreateScan,
+  useDeleteScan,
   useGetScanStats,
   getListScansQueryKey,
-  getGetScanStatsQueryKey
+  getGetScanStatsQueryKey,
 } from "@workspace/api-client-react";
 
 const scanFormSchema = z.object({
-  url: z.string().url("Please enter a valid URL (e.g., https://example.com)"),
+  url: z
+    .string()
+    .min(1, "URL is required")
+    .refine(
+      (v) => {
+        try {
+          const u = new URL(v);
+          return u.protocol === "http:" || u.protocol === "https:";
+        } catch { return false; }
+      },
+      "Enter a valid URL starting with http:// or https://"
+    ),
 });
 
 export default function Home() {
@@ -45,35 +53,29 @@ export default function Home() {
 
   const { data: stats, isLoading: statsLoading } = useGetScanStats();
   const { data: scans, isLoading: scansLoading } = useListScans();
-  
+
   const createScan = useCreateScan();
   const deleteScan = useDeleteScan();
 
   const form = useForm<z.infer<typeof scanFormSchema>>({
     resolver: zodResolver(scanFormSchema),
-    defaultValues: {
-      url: "",
-    },
+    defaultValues: { url: "" },
   });
 
   function onSubmit(values: z.infer<typeof scanFormSchema>) {
     createScan.mutate({ data: { url: values.url } }, {
       onSuccess: (data) => {
-        toast({
-          title: "Scan Initiated",
-          description: `Target: ${values.url}`,
-        });
         queryClient.invalidateQueries({ queryKey: getListScansQueryKey() });
         queryClient.invalidateQueries({ queryKey: getGetScanStatsQueryKey() });
         setLocation(`/scans/${data.id}`);
       },
       onError: (error) => {
         toast({
-          title: "Scan Failed",
-          description: error.error || "An error occurred starting the scan",
+          title: "Scan Failed to Start",
+          description: (error as any).error ?? "An error occurred starting the scan",
           variant: "destructive",
         });
-      }
+      },
     });
   }
 
@@ -82,171 +84,180 @@ export default function Home() {
     e.stopPropagation();
     deleteScan.mutate({ id }, {
       onSuccess: () => {
-        toast({
-          title: "Scan Deleted",
-          description: "The scan record has been removed.",
-        });
         queryClient.invalidateQueries({ queryKey: getListScansQueryKey() });
         queryClient.invalidateQueries({ queryKey: getGetScanStatsQueryKey() });
-      }
+      },
     });
   }
 
+  const isPending = createScan.isPending;
+
   return (
-    <div className="space-y-8 max-w-5xl mx-auto">
-      {/* Target Input Section */}
+    <div className="space-y-8 max-w-4xl mx-auto">
+      {/* Scan Input */}
       <section>
-        <Card className="border-primary/20 bg-card/40 backdrop-blur">
-          <CardContent className="pt-6">
+        <Card className="border-primary/20 bg-card shadow-sm">
+          <CardContent className="pt-6 pb-6">
             <Form {...form}>
-              <form onSubmit={form.handleSubmit(onSubmit)} className="flex gap-4 items-start">
+              <form onSubmit={form.handleSubmit(onSubmit)} className="flex gap-3 items-start">
                 <FormField
                   control={form.control}
                   name="url"
                   render={({ field }) => (
                     <FormItem className="flex-1">
                       <div className="relative">
-                        <Target className="absolute left-3 top-3 h-5 w-5 text-muted-foreground" />
+                        <Target className="absolute left-3 top-3 h-5 w-5 text-muted-foreground pointer-events-none" />
                         <FormControl>
-                          <Input 
-                            placeholder="https://target-domain.com" 
-                            className="pl-10 font-mono text-lg h-12 bg-background/50 focus-visible:ring-primary"
+                          <Input
+                            placeholder="https://example.com"
+                            className="pl-10 font-mono h-11 bg-background focus-visible:ring-primary"
                             data-testid="input-target-url"
-                            {...field} 
+                            disabled={isPending}
+                            {...field}
                           />
                         </FormControl>
                       </div>
-                      <FormMessage />
+                      <FormMessage className="font-mono text-xs" />
                     </FormItem>
                   )}
                 />
-                <Button 
-                  type="submit" 
-                  size="lg"
-                  className="h-12 px-8 font-mono font-bold"
-                  disabled={createScan.isPending}
-                  data-testid="button-start-scan"
-                >
-                  {createScan.isPending ? (
-                    <Loader2 className="mr-2 h-5 w-5 animate-spin" />
-                  ) : (
-                    <Activity className="mr-2 h-5 w-5" />
-                  )}
-                  INITIATE SCAN
-                </Button>
+                <ScanButton isPending={isPending} />
               </form>
             </Form>
+
+            {/* Scanning progress indicator */}
+            {isPending && (
+              <div className="mt-4 space-y-2">
+                <div className="h-1 bg-muted rounded-full overflow-hidden">
+                  <div className="h-full w-1/3 bg-primary rounded-full scan-sweep" />
+                </div>
+                <p className="text-xs font-mono text-muted-foreground text-center">
+                  Initiating scan — you will be redirected automatically
+                </p>
+              </div>
+            )}
           </CardContent>
         </Card>
       </section>
 
-      {/* Stats Section */}
-      <section className="grid grid-cols-1 md:grid-cols-4 gap-4">
+      {/* Stats */}
+      <section className="grid grid-cols-2 md:grid-cols-4 gap-3">
         {statsLoading ? (
           Array(4).fill(0).map((_, i) => <Skeleton key={i} className="h-24" />)
         ) : (
           <>
-            <StatCard 
-              title="TOTAL SCANS" 
-              value={stats?.totalScans ?? 0} 
-              icon={<Activity className="h-4 w-4 text-primary" />} 
+            <StatCard
+              title="Total Scans"
+              value={stats?.totalScans ?? 0}
+              icon={<Activity className="h-4 w-4 text-primary" />}
             />
-            <StatCard 
-              title="CRITICAL FINDINGS" 
-              value={stats?.criticalFindings ?? 0} 
+            <StatCard
+              title="Critical"
+              value={stats?.criticalFindings ?? 0}
               valueClass="text-red-500"
-              icon={<ShieldAlert className="h-4 w-4 text-red-500" />} 
+              icon={<ShieldAlert className="h-4 w-4 text-red-500" />}
             />
-            <StatCard 
-              title="HIGH FINDINGS" 
-              value={stats?.highFindings ?? 0} 
+            <StatCard
+              title="High"
+              value={stats?.highFindings ?? 0}
               valueClass="text-orange-500"
-              icon={<AlertTriangle className="h-4 w-4 text-orange-500" />} 
+              icon={<AlertTriangle className="h-4 w-4 text-orange-500" />}
             />
-            <StatCard 
-              title="PASSED / SECURE" 
-              value={stats?.completedScans ?? 0} 
-              valueClass="text-blue-400"
-              icon={<ShieldCheck className="h-4 w-4 text-blue-400" />} 
+            <StatCard
+              title="Passed"
+              value={stats?.completedScans ?? 0}
+              valueClass="text-green-600 dark:text-green-400"
+              icon={<ShieldCheck className="h-4 w-4 text-green-500" />}
             />
           </>
         )}
       </section>
 
-      {/* History Section */}
+      {/* History */}
       <section>
-        <Card className="border-border/50">
-          <CardHeader>
-            <CardTitle className="font-mono text-sm tracking-wider text-muted-foreground flex items-center gap-2">
+        <Card className="border-border/60 shadow-sm">
+          <CardHeader className="pb-3">
+            <CardTitle className="font-mono text-xs tracking-widest text-muted-foreground uppercase flex items-center gap-2">
               <Clock className="w-4 h-4" />
-              RECENT SCANS
+              Scan History
             </CardTitle>
           </CardHeader>
-          <CardContent>
+          <CardContent className="pt-0">
             {scansLoading ? (
               <div className="space-y-2">
                 {Array(3).fill(0).map((_, i) => <Skeleton key={i} className="h-12" />)}
               </div>
             ) : !scans || scans.length === 0 ? (
-              <div className="text-center py-8 text-muted-foreground font-mono text-sm">
-                NO SCAN HISTORY FOUND
+              <div className="text-center py-10 text-muted-foreground font-mono text-sm">
+                No scan history yet — enter a URL above to begin
               </div>
             ) : (
-              <div className="rounded-md border border-border/50">
+              <div className="rounded-md border border-border/50 overflow-hidden">
                 <Table>
                   <TableHeader>
-                    <TableRow className="hover:bg-transparent">
-                      <TableHead className="font-mono text-xs">TARGET</TableHead>
-                      <TableHead className="font-mono text-xs w-[120px]">STATUS</TableHead>
-                      <TableHead className="font-mono text-xs w-[200px]">FINDINGS</TableHead>
-                      <TableHead className="font-mono text-xs w-[150px]">TIME</TableHead>
-                      <TableHead className="w-[50px]"></TableHead>
+                    <TableRow className="hover:bg-transparent bg-muted/30">
+                      <TableHead className="font-mono text-[11px] uppercase tracking-wider">Target</TableHead>
+                      <TableHead className="font-mono text-[11px] uppercase tracking-wider w-28">Status</TableHead>
+                      <TableHead className="font-mono text-[11px] uppercase tracking-wider w-48">Findings</TableHead>
+                      <TableHead className="font-mono text-[11px] uppercase tracking-wider w-36">Time</TableHead>
+                      <TableHead className="w-10" />
                     </TableRow>
                   </TableHeader>
                   <TableBody>
                     {scans.map((scan) => (
-                      <TableRow 
+                      <TableRow
                         key={scan.id}
-                        className="cursor-pointer group hover:bg-muted/30"
+                        className="cursor-pointer group hover:bg-muted/30 transition-colors"
                         onClick={() => setLocation(`/scans/${scan.id}`)}
                         data-testid={`row-scan-${scan.id}`}
                       >
-                        <TableCell className="font-mono text-sm">
+                        <TableCell className="font-mono text-sm max-w-xs truncate" title={scan.url}>
                           {scan.url}
                         </TableCell>
                         <TableCell>
                           <Badge variant="outline" className={
-                            scan.status === 'completed' ? 'border-primary text-primary' :
-                            scan.status === 'failed' ? 'border-destructive text-destructive' :
-                            'border-yellow-500 text-yellow-500 animate-pulse'
+                            scan.status === "completed" ? "border-primary text-primary text-[10px]" :
+                            scan.status === "failed" ? "border-destructive text-destructive text-[10px]" :
+                            "border-yellow-500 text-yellow-500 text-[10px] animate-pulse"
                           }>
                             {scan.status.toUpperCase()}
                           </Badge>
                         </TableCell>
                         <TableCell>
                           {scan.result?.summary ? (
-                            <div className="flex gap-1">
-                              {scan.result.summary.critical > 0 && <span className="text-red-500 font-mono text-xs">C:{scan.result.summary.critical}</span>}
-                              {scan.result.summary.high > 0 && <span className="text-orange-500 font-mono text-xs">H:{scan.result.summary.high}</span>}
-                              {scan.result.summary.medium > 0 && <span className="text-yellow-500 font-mono text-xs">M:{scan.result.summary.medium}</span>}
-                              {scan.result.summary.critical === 0 && scan.result.summary.high === 0 && <span className="text-muted-foreground font-mono text-xs">CLEAN</span>}
+                            <div className="flex gap-1.5 flex-wrap">
+                              {scan.result.summary.critical > 0 && (
+                                <span className="text-red-500 font-mono text-[11px] font-bold">C:{scan.result.summary.critical}</span>
+                              )}
+                              {scan.result.summary.high > 0 && (
+                                <span className="text-orange-500 font-mono text-[11px] font-bold">H:{scan.result.summary.high}</span>
+                              )}
+                              {scan.result.summary.medium > 0 && (
+                                <span className="text-yellow-500 font-mono text-[11px] font-bold">M:{scan.result.summary.medium}</span>
+                              )}
+                              {scan.result.summary.low > 0 && (
+                                <span className="text-green-500 font-mono text-[11px] font-bold">L:{scan.result.summary.low}</span>
+                              )}
+                              {scan.result.summary.critical === 0 && scan.result.summary.high === 0 && scan.result.summary.medium === 0 && (
+                                <span className="text-green-500 font-mono text-[11px]">Clean</span>
+                              )}
                             </div>
                           ) : (
-                            <span className="text-muted-foreground">-</span>
+                            <span className="text-muted-foreground text-xs">—</span>
                           )}
                         </TableCell>
                         <TableCell className="text-muted-foreground text-xs font-mono">
                           {formatDistanceToNow(new Date(scan.createdAt), { addSuffix: true })}
                         </TableCell>
                         <TableCell>
-                          <Button 
-                            variant="ghost" 
-                            size="icon" 
-                            className="opacity-0 group-hover:opacity-100 hover:text-destructive"
+                          <Button
+                            variant="ghost"
+                            size="icon"
+                            className="opacity-0 group-hover:opacity-100 hover:text-destructive h-7 w-7"
                             onClick={(e) => handleDelete(e, scan.id)}
                             data-testid={`button-delete-scan-${scan.id}`}
                           >
-                            <Trash2 className="h-4 w-4" />
+                            <Trash2 className="h-3.5 w-3.5" />
                           </Button>
                         </TableCell>
                       </TableRow>
@@ -262,16 +273,45 @@ export default function Home() {
   );
 }
 
-function StatCard({ title, value, icon, valueClass = "" }: { title: string, value: number, icon: React.ReactNode, valueClass?: string }) {
+function ScanButton({ isPending }: { isPending: boolean }) {
   return (
-    <Card className="border-border/50 bg-card/40">
-      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-2">
-        <CardTitle className="text-xs font-mono font-medium text-muted-foreground">
+    <Button
+      type="submit"
+      size="lg"
+      className="h-11 px-6 font-mono font-bold relative overflow-hidden"
+      disabled={isPending}
+      data-testid="button-start-scan"
+    >
+      {isPending ? (
+        <>
+          <span className="absolute inset-0 bg-primary/20 animate-pulse rounded" />
+          <Loader2 className="mr-2 h-4 w-4 animate-spin" />
+          SCANNING
+        </>
+      ) : (
+        <>
+          <Scan className="mr-2 h-4 w-4" />
+          SCAN
+        </>
+      )}
+    </Button>
+  );
+}
+
+function StatCard({
+  title, value, icon, valueClass = "",
+}: {
+  title: string; value: number; icon: React.ReactNode; valueClass?: string;
+}) {
+  return (
+    <Card className="border-border/50 bg-card/60 shadow-sm">
+      <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-1 pt-4 px-4">
+        <CardTitle className="text-[11px] font-mono font-medium text-muted-foreground uppercase tracking-wider">
           {title}
         </CardTitle>
         {icon}
       </CardHeader>
-      <CardContent>
+      <CardContent className="px-4 pb-4">
         <div className={`text-2xl font-mono font-bold ${valueClass}`}>{value}</div>
       </CardContent>
     </Card>
