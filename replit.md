@@ -44,6 +44,65 @@ A personal web security scanner that lets you audit your own websites for common
 - Each finding includes a description and actionable remediation recommendation.
 - Scan history is stored and accessible at any time.
 
+## Chạy local (macOS / Windows / Linux)
+
+Để xem bot tự động hoạt động trực quan với cửa sổ trình duyệt thật, chạy dự án trên máy cục bộ:
+
+### Bước 1 — Cài tools cần thiết
+
+```bash
+# Cài pnpm nếu chưa có
+npm install -g pnpm
+
+# macOS: cài PostgreSQL qua Homebrew
+brew install postgresql@16
+brew services start postgresql@16
+createdb vuln_scanner
+
+# Ubuntu/Debian
+sudo apt install postgresql postgresql-contrib
+sudo -u postgres createdb vuln_scanner
+
+# Windows: tải installer tại https://www.postgresql.org/download/windows/
+```
+
+> **Không cần cài Chrome/Chromium** — Puppeteer tự đi kèm bản Chromium riêng khi chạy `pnpm install`.
+
+### Bước 2 — Setup project
+
+```bash
+# Giải nén .zip, vào thư mục
+cd vuln-scanner-project
+pnpm install
+
+# Tạo file .env ở root
+DATABASE_URL=postgresql://localhost:5432/vuln_scanner
+PUPPETEER_HEADLESS=false   # kích hoạt headed mode — cửa sổ trình duyệt sẽ hiện ra màn hình
+
+# Tạo bảng DB
+pnpm --filter @workspace/db run push
+```
+
+### Bước 3 — Chạy 2 terminal song song
+
+```bash
+# Terminal 1: API backend (port 8080)
+pnpm --filter @workspace/api-server run dev
+
+# Terminal 2: Frontend (port 19593)
+pnpm --filter @workspace/vuln-scanner run dev
+```
+
+### Bước 4 — Mở trình duyệt
+
+```
+http://localhost:19593
+```
+
+Khi bấm **🤖 Run Automation** trong SandboxViewer, một cửa sổ **Chromium thực tế** sẽ tự bật lên — tự điều hướng đến target, tự gõ từng ký tự vào form đăng nhập với delay ngẫu nhiên như người thật, stream log realtime về C2 Terminal panel trong dashboard.
+
+---
+
 ## User preferences
 
 _Populate as you build — explicit user instructions worth remembering across sessions._
