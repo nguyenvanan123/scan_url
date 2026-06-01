@@ -8,7 +8,7 @@
  * pipeline (scanner.ts, routes.ts, frontend) requires zero changes.
  */
 
-import puppeteer, { Browser, Page } from "puppeteer";
+import puppeteer, { Browser, BrowserContext, Page } from "puppeteer";
 import { execSync } from "child_process";
 import { URL } from "url";
 
@@ -65,28 +65,33 @@ interface PageData {
 
 // ── Page pool ─────────────────────────────────────────────────────────────────
 
-class PagePool {
-  private available: Page[] = [];
-  private waitQueue: Array<(p: Page) => void> = [];
+interface PoolEntry {
+  page: Page;
+  ctx: BrowserContext;
+}
 
-  seed(pages: Page[]): void {
-    this.available = [...pages];
+class PagePool {
+  private available: PoolEntry[] = [];
+  private waitQueue: Array<(e: PoolEntry) => void> = [];
+
+  seed(entries: PoolEntry[]): void {
+    this.available = [...entries];
   }
 
-  checkout(): Promise<Page> {
+  checkout(): Promise<PoolEntry> {
     if (this.available.length > 0) {
       return Promise.resolve(this.available.pop()!);
     }
-    return new Promise<Page>((resolve) => {
+    return new Promise<PoolEntry>((resolve) => {
       this.waitQueue.push(resolve);
     });
   }
 
-  checkin(page: Page): void {
+  checkin(entry: PoolEntry): void {
     if (this.waitQueue.length > 0) {
-      this.waitQueue.shift()!(page);
+      this.waitQueue.shift()!(entry);
     } else {
-      this.available.push(page);
+      this.available.push(entry);
     }
   }
 }
@@ -126,8 +131,15 @@ function resolveInternal(href: string, base: URL, origin: string): string | null
 
 // ── Puppeteer page setup ──────────────────────────────────────────────────────
 
-async function preparePage(browser: Browser): Promise<Page> {
-  const page = await browser.newPage();
+/**
+ * Create an isolated BrowserContext for each pool slot.
+ * Contexts share the browser process (single Chrome) but have completely
+ * isolated cookies, storage, and cache — preventing one crawl slot from
+ * contaminating another (especially important on auth-gated sites).
+ */
+async function preparePage(browser: Browser): Promise<PoolEntry> {
+  const ctx  = await browser.createBrowserContext();
+  const page = await ctx.newPage();
 
   // Block heavy resources — we only need the rendered DOM
   await page.setRequestInterception(true);
@@ -144,7 +156,7 @@ async function preparePage(browser: Browser): Promise<Page> {
   page.on("console", () => {});
   page.on("pageerror", () => {});
 
-  return page;
+  return { page, ctx };
 }
 
 // ── Core page fetch ───────────────────────────────────────────────────────────
@@ -270,13 +282,13 @@ export async function crawl(targetUrl: string, options: CrawlOptions = {}): Prom
       ],
     });
 
-    // Pre-create page pool
-    const pool = new PagePool();
+    // Pre-create pool: one isolated BrowserContext per slot
+    const pool     = new PagePool();
     const poolSize = Math.min(concurrency, maxPages);
-    const pages: Page[] = await Promise.all(
+    const entries: PoolEntry[] = await Promise.all(
       Array.from({ length: poolSize }, () => preparePage(browser!))
     );
-    pool.seed(pages);
+    pool.seed(entries);
 
     // BFS loop
     while (queue.length > 0 && visited.size < maxPages) {
@@ -286,7 +298,8 @@ export async function crawl(targetUrl: string, options: CrawlOptions = {}): Prom
       await Promise.all(
         batch.map(async ([pageUrl, depth]) => {
           visited.add(pageUrl);
-          const page = await pool.checkout();
+          const entry = await pool.checkout();
+          const { page } = entry;
 
           try {
             const data = await fetchPageData(page, pageUrl, timeoutMs, origin);
@@ -329,9 +342,9 @@ export async function crawl(targetUrl: string, options: CrawlOptions = {}): Prom
           } catch (err: any) {
             errors.push(`${pageUrl}: ${err.message ?? String(err)}`);
           } finally {
-            // Reset page to blank to free memory before returning to pool
+            // Navigate to blank to clear page state (context isolation is preserved)
             await page.goto("about:blank").catch(() => {});
-            pool.checkin(page);
+            pool.checkin(entry);
           }
         })
       );

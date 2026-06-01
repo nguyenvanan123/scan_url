@@ -1,8 +1,10 @@
 import { Router } from "express";
 import { db } from "@workspace/db";
 import { scansTable } from "@workspace/db";
-import { eq, desc, sql } from "drizzle-orm";
+import { eq, desc } from "drizzle-orm";
 import { runScan } from "../lib/scanner";
+import { scanRegistry } from "../lib/scan-events";
+import type { ScanProgressEvent, ProgressCallback } from "../lib/scan-events";
 import {
   CreateScanBody,
   GetScanParams,
@@ -78,6 +80,52 @@ router.get("/scans", async (req, res) => {
   }
 });
 
+// ── Real-time Server-Sent Events progress stream ─────────────────────────────
+router.get("/scans/:id/events", (req, res) => {
+  const id = parseInt(req.params.id, 10);
+  if (isNaN(id) || id <= 0) {
+    res.status(400).json({ error: "Invalid scan ID" });
+    return;
+  }
+
+  res.setHeader("Content-Type", "text/event-stream");
+  res.setHeader("Cache-Control", "no-cache");
+  res.setHeader("Connection", "keep-alive");
+  res.setHeader("X-Accel-Buffering", "no");
+  res.flushHeaders();
+
+  const sendEvent = (data: ScanProgressEvent) => {
+    res.write(`data: ${JSON.stringify(data)}\n\n`);
+  };
+
+  const emitter = scanRegistry.get(id);
+  if (!emitter) {
+    sendEvent({ type: "done", status: "not_running" });
+    res.end();
+    return;
+  }
+
+  const keepAlive = setInterval(() => {
+    res.write(": ping\n\n");
+  }, 20_000);
+
+  const onEvent = (event: ScanProgressEvent) => {
+    sendEvent(event);
+    if (event.type === "done") {
+      clearInterval(keepAlive);
+      res.end();
+    }
+  };
+
+  emitter.on("progress", onEvent);
+
+  req.on("close", () => {
+    clearInterval(keepAlive);
+    emitter.off("progress", onEvent);
+  });
+});
+
+// ── POST /scans ───────────────────────────────────────────────────────────────
 router.post("/scans", async (req, res) => {
   const parseResult = CreateScanBody.safeParse(req.body);
   if (!parseResult.success) {
@@ -109,17 +157,26 @@ router.post("/scans", async (req, res) => {
     completedAt: scan.completedAt?.toISOString() ?? null,
   });
 
+  const emitter = scanRegistry.create(scan.id);
+  const onProgress: ProgressCallback = (event) => {
+    emitter.emit("progress", event);
+  };
+
   try {
-    const result = await runScan(parsedUrl.toString(), crawl_enabled ?? false);
+    const result = await runScan(parsedUrl.toString(), crawl_enabled ?? false, onProgress);
+    emitter.emit("progress", { type: "done", status: "completed" });
     await db
       .update(scansTable)
       .set({ status: "completed", result, completedAt: new Date() })
       .where(eq(scansTable.id, scan.id));
   } catch (err: any) {
+    emitter.emit("progress", { type: "done", status: "failed", error: err.message ?? "Unknown error" });
     await db
       .update(scansTable)
       .set({ status: "failed", errorMessage: err.message ?? "Unknown error", completedAt: new Date() })
       .where(eq(scansTable.id, scan.id));
+  } finally {
+    setTimeout(() => scanRegistry.delete(scan.id), 5_000);
   }
 });
 

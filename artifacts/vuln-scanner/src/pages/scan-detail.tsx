@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { useRoute } from "wouter";
 import { useGetScan, getGetScanQueryKey } from "@workspace/api-client-react";
 import { formatDistanceToNow } from "date-fns";
@@ -7,7 +7,7 @@ import {
   Info, ArrowLeft, Server, Lock, Globe,
   FileCode, CheckCircle2, XCircle, Activity,
   ChevronDown, ChevronUp, Search, FolderLock, Syringe,
-  Globe2, Link2, FormInput, Code2
+  Globe2, Link2, FormInput, Code2, Terminal
 } from "lucide-react";
 import { Link } from "wouter";
 
@@ -19,85 +19,164 @@ import { ScanFinding, ScanFindingCategory } from "@workspace/api-zod";
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"] as const;
 
-const SCAN_STAGES = [
-  "Resolving DNS records...",
-  "Checking SSL/TLS certificate...",
-  "Probing HTTP security headers...",
-  "Inspecting server information...",
-  "Discovering content paths...",
-  "Testing HTTP methods...",
-  "Aggregating findings...",
-];
+// ── Server-Sent Events progress types ────────────────────────────────────────
 
-function ScanningAnimation({ url }: { url: string }) {
-  const [stageIndex, setStageIndex] = useState(0);
-  const [dots, setDots] = useState("");
+type SseEvent =
+  | { type: "phase";   message: string; pct: number }
+  | { type: "target";  current: number; total: number; url: string; check: string }
+  | { type: "finding"; severity: string; title: string }
+  | { type: "done";    status: string; error?: string };
+
+interface LogEntry {
+  id: number;
+  time: string;
+  text: string;
+  kind: "phase" | "target" | "finding" | "done" | "error";
+}
+
+// ── Live Scan Progress (SSE-powered) ─────────────────────────────────────────
+
+function LiveScanProgress({ scanId, url }: { scanId: number; url: string }) {
+  const [pct, setPct]               = useState(0);
+  const [currentMsg, setCurrentMsg] = useState("Connecting to scan engine...");
+  const [logs, setLogs]             = useState<LogEntry[]>([]);
+  const logCounter                  = useRef(0);
+  const logsEndRef                  = useRef<HTMLDivElement>(null);
+
+  const addLog = (text: string, kind: LogEntry["kind"]) => {
+    const id   = ++logCounter.current;
+    const time = new Date().toLocaleTimeString("en-US", { hour12: false });
+    setLogs((prev) => [...prev.slice(-299), { id, time, text, kind }]);
+  };
 
   useEffect(() => {
-    const stageTimer = setInterval(() => {
-      setStageIndex((i) => (i + 1) % SCAN_STAGES.length);
-    }, 2000);
-    const dotsTimer = setInterval(() => {
-      setDots((d) => (d.length >= 3 ? "" : d + "."));
-    }, 400);
-    return () => { clearInterval(stageTimer); clearInterval(dotsTimer); };
-  }, []);
+    const es = new EventSource(`/api/scans/${scanId}/events`);
+
+    es.onopen = () => {
+      addLog("Connected to scan engine.", "phase");
+    };
+
+    es.onmessage = (e: MessageEvent) => {
+      try {
+        const ev = JSON.parse(e.data as string) as SseEvent;
+
+        if (ev.type === "phase") {
+          setPct(ev.pct);
+          setCurrentMsg(ev.message);
+          addLog(ev.message, "phase");
+
+        } else if (ev.type === "target") {
+          const progress = 45 + Math.round((ev.current / ev.total) * 47);
+          setPct(progress);
+          setCurrentMsg(`[${ev.current}/${ev.total}] ${new URL(ev.url).pathname}${new URL(ev.url).search}`);
+          addLog(`[${ev.current}/${ev.total}] ${ev.url}`, "target");
+
+        } else if (ev.type === "finding") {
+          addLog(`⚑ [${ev.severity.toUpperCase()}] ${ev.title}`, "finding");
+
+        } else if (ev.type === "done") {
+          setPct(100);
+          setCurrentMsg(ev.status === "completed" ? "Scan complete." : `Scan failed: ${ev.error ?? "unknown error"}`);
+          addLog(ev.status === "completed" ? "✓ Scan complete." : `✗ Failed: ${ev.error ?? "unknown"}`, "done");
+          es.close();
+        }
+      } catch {
+        // ignore malformed events
+      }
+    };
+
+    es.onerror = () => {
+      addLog("SSE connection closed.", "error");
+      es.close();
+    };
+
+    return () => es.close();
+  }, [scanId]);
+
+  // Auto-scroll logs console
+  useEffect(() => {
+    logsEndRef.current?.scrollIntoView({ behavior: "smooth" });
+  }, [logs]);
 
   return (
     <Card className="border-primary/30 bg-card">
-      <CardContent className="py-12 px-8">
-        <div className="max-w-lg mx-auto space-y-8">
-          {/* Animated scanner icon */}
-          <div className="flex justify-center">
-            <div className="relative">
-              <div className="w-20 h-20 rounded-full border-2 border-primary/20 flex items-center justify-center">
-                <div className="w-14 h-14 rounded-full border-2 border-primary/40 flex items-center justify-center">
-                  <Search className="w-7 h-7 text-primary animate-pulse" />
+      <CardContent className="py-8 px-6 md:px-8">
+        <div className="max-w-2xl mx-auto space-y-6">
+
+          {/* Icon + target + current message */}
+          <div className="flex items-start gap-4">
+            <div className="relative flex-shrink-0 mt-0.5">
+              <div className="w-11 h-11 rounded-full border border-primary/30 flex items-center justify-center">
+                <Search className="w-5 h-5 text-primary animate-pulse" />
+              </div>
+              <div className="absolute inset-0 rounded-full border border-transparent border-t-primary animate-spin" />
+            </div>
+            <div className="min-w-0 flex-1">
+              <div className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest mb-0.5">Target</div>
+              <div className="font-mono text-sm text-foreground truncate" title={url}>{url}</div>
+              <div className="font-mono text-xs text-primary/80 truncate mt-1" title={currentMsg}>{currentMsg}</div>
+            </div>
+          </div>
+
+          {/* Real-time progress bar */}
+          <div className="space-y-1.5">
+            <div className="flex items-center justify-between text-[10px] font-mono text-muted-foreground">
+              <span className="uppercase tracking-widest">Progress</span>
+              <span className="text-primary font-bold tabular-nums">{pct}%</span>
+            </div>
+            <div className="h-1.5 bg-muted rounded-full overflow-hidden">
+              <div
+                className="h-full bg-primary rounded-full transition-all duration-500 ease-out"
+                style={{ width: `${pct}%` }}
+              />
+            </div>
+          </div>
+
+          {/* Live log console */}
+          <div>
+            <div className="flex items-center gap-2 mb-2">
+              <Terminal className="w-3 h-3 text-muted-foreground" />
+              <span className="text-[10px] font-mono text-muted-foreground uppercase tracking-widest">Live Output</span>
+              <span className="ml-auto flex items-center gap-1 text-[10px] font-mono text-primary">
+                <span className="inline-block w-1.5 h-1.5 rounded-full bg-primary animate-pulse" />
+                LIVE
+              </span>
+            </div>
+            <div className="rounded border border-border/40 bg-[#0c0c0c] h-52 overflow-y-auto p-3 space-y-px font-mono text-[11px] leading-5">
+              {logs.length === 0 && (
+                <div className="text-zinc-600 italic">Waiting for scan events...</div>
+              )}
+              {logs.map((entry) => (
+                <div key={entry.id} className="flex gap-2.5 min-w-0">
+                  <span className="text-zinc-600 flex-shrink-0 select-none tabular-nums">{entry.time}</span>
+                  <span
+                    className={
+                      entry.kind === "finding"
+                        ? "text-red-400 break-all"
+                        : entry.kind === "done"
+                        ? "text-green-400"
+                        : entry.kind === "error"
+                        ? "text-yellow-500"
+                        : entry.kind === "target"
+                        ? "text-zinc-300 break-all"
+                        : "text-cyan-400/80"
+                    }
+                  >
+                    {entry.text}
+                  </span>
                 </div>
-              </div>
-              <div className="absolute inset-0 rounded-full border-2 border-transparent border-t-primary animate-spin" />
+              ))}
+              <div ref={logsEndRef} />
             </div>
           </div>
 
-          {/* Target URL */}
-          <div className="text-center">
-            <div className="text-xs font-mono text-muted-foreground mb-1 uppercase tracking-widest">Target</div>
-            <div className="font-mono text-sm text-foreground truncate">{url}</div>
-          </div>
-
-          {/* Progress bar */}
-          <div className="space-y-2">
-            <div className="h-1 bg-muted rounded-full overflow-hidden">
-              <div className="h-full w-1/3 bg-primary rounded-full scan-sweep" />
-            </div>
-            <div className="flex items-center gap-2 font-mono text-xs text-primary">
-              <span className="inline-block w-2 h-2 rounded-full bg-primary animate-pulse" />
-              <span>{SCAN_STAGES[stageIndex]}<span className="blink">{dots}</span></span>
-            </div>
-          </div>
-
-          {/* Stage checklist */}
-          <div className="space-y-2">
-            {SCAN_STAGES.slice(0, -1).map((stage, i) => (
-              <div key={stage} className="flex items-center gap-3 font-mono text-xs">
-                {i < stageIndex ? (
-                  <CheckCircle2 className="w-3.5 h-3.5 text-green-500 flex-shrink-0" />
-                ) : i === stageIndex ? (
-                  <div className="w-3.5 h-3.5 rounded-full border border-primary animate-pulse flex-shrink-0" />
-                ) : (
-                  <div className="w-3.5 h-3.5 rounded-full border border-border flex-shrink-0" />
-                )}
-                <span className={i < stageIndex ? "text-muted-foreground line-through" : i === stageIndex ? "text-foreground" : "text-muted-foreground/50"}>
-                  {stage}
-                </span>
-              </div>
-            ))}
-          </div>
         </div>
       </CardContent>
     </Card>
   );
 }
+
+// ── Finding card ──────────────────────────────────────────────────────────────
 
 interface FindingCardProps {
   finding: ScanFinding;
@@ -191,6 +270,8 @@ function FindingCard({ finding }: FindingCardProps) {
   );
 }
 
+// ── Main scan detail page ─────────────────────────────────────────────────────
+
 export default function ScanDetail() {
   const [, params] = useRoute("/scans/:id");
   const id = params?.id ? parseInt(params.id) : 0;
@@ -264,8 +345,8 @@ export default function ScanDetail() {
         </div>
       </div>
 
-      {/* Running state */}
-      {isRunning && <ScanningAnimation url={scan.url} />}
+      {/* Running state — live SSE progress */}
+      {isRunning && <LiveScanProgress scanId={scan.id} url={scan.url} />}
 
       {/* Failed state */}
       {!isRunning && !scan.result && (
@@ -349,6 +430,8 @@ export default function ScanDetail() {
     </div>
   );
 }
+
+// ── Supporting components ─────────────────────────────────────────────────────
 
 interface CrawlSummaryData {
   pagesVisited: number;
@@ -566,41 +649,31 @@ function getSeverityConfig(severity: string) {
         remediationText: "text-foreground",
         remediationBorder: "border-green-500/20",
       };
-    default: // info
+    default:
       return {
-        borderColor: "border-l-slate-400",
-        bgColor: "bg-slate-500/5",
-        cardBorder: "border-slate-500/20",
-        badgeBg: "bg-slate-500/10",
-        badgeText: "text-slate-500",
-        labelColor: "text-muted-foreground",
+        borderColor: "border-l-zinc-500",
+        bgColor: "bg-zinc-500/5",
+        cardBorder: "border-zinc-500/20",
+        badgeBg: "bg-zinc-500/15",
+        badgeText: "text-zinc-500",
+        labelColor: "text-zinc-500",
         icon: <Info className="w-3.5 h-3.5" />,
-        remediationBg: "bg-slate-500/5",
+        remediationBg: "bg-zinc-500/5",
         remediationText: "text-foreground",
-        remediationBorder: "border-slate-500/20",
+        remediationBorder: "border-zinc-500/20",
       };
-  }
-}
-
-function getCategoryIcon(category: string) {
-  switch (category) {
-    case "dns":               return <Globe className="w-3.5 h-3.5" />;
-    case "ssl":               return <Lock className="w-3.5 h-3.5" />;
-    case "headers":           return <FileCode className="w-3.5 h-3.5" />;
-    case "server_info":       return <Server className="w-3.5 h-3.5" />;
-    case "content_discovery": return <Search className="w-3.5 h-3.5" />;
-    case "http_methods":      return <Activity className="w-3.5 h-3.5" />;
-    case "sensitive_files":   return <FolderLock className="w-3.5 h-3.5" />;
-    case "injection":         return <Syringe className="w-3.5 h-3.5" />;
-    default:                  return <ShieldAlert className="w-3.5 h-3.5" />;
   }
 }
 
 function getStatusIcon(status: string) {
   switch (status) {
-    case "pass":    return <CheckCircle2 className="w-4 h-4 text-green-500" />;
-    case "fail":    return <XCircle className="w-4 h-4 text-red-500" />;
-    case "warning": return <AlertTriangle className="w-4 h-4 text-yellow-500" />;
-    default:        return <Info className="w-4 h-4 text-slate-400" />;
+    case "pass":
+      return <CheckCircle2 className="w-4 h-4 text-green-500" />;
+    case "fail":
+      return <XCircle className="w-4 h-4 text-destructive" />;
+    case "warning":
+      return <AlertTriangle className="w-4 h-4 text-yellow-500" />;
+    default:
+      return <Info className="w-4 h-4 text-muted-foreground" />;
   }
 }

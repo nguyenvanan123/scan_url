@@ -2,8 +2,12 @@ import https from "https";
 import http from "http";
 import dns from "dns/promises";
 import { URL } from "url";
+import pLimit from "p-limit";
 import { validateSensitiveFile, validateSqlInjection, validateXssReflection } from "./response-validator.js";
 import { crawl, CrawlResult, FormInfo } from "./crawler.js";
+import type { ProgressCallback } from "./scan-events.js";
+
+const INJECTION_CONCURRENCY = 5;
 
 export interface ScanFinding {
   id: string;
@@ -1421,7 +1425,7 @@ const SQLI_TIME_PAYLOADS: Array<{ db: string; payload: string }> = [
 ];
 
 const DELAY_THRESHOLD_MS = 4500; // triggered SLEEP(5) = ~5s; flag at 4.5s to allow network variance
-const TIMING_TIMEOUT_MS  = 14_000; // generous enough for 5s DB sleep + 9s network overhead
+const TIMING_TIMEOUT_MS  = 7_000; // 5s DB sleep + 2s overhead; aborts hung requests promptly
 
 async function measureBaseline(url: string): Promise<number> {
   try {
@@ -1583,7 +1587,7 @@ async function checkXssReflectedAdvanced(targetUrl: string): Promise<ScanFinding
       try {
         const testUrl = new URL(targetUrl);
         testUrl.searchParams.set(param, payload);
-        const res = await fetchUrl(testUrl.toString(), "GET", 7000);
+        const res = await fetchUrl(testUrl.toString(), "GET", 5000);
 
         const contentType = headerStr(res.headers["content-type"]) ?? "";
         if (!contentType.includes("html")) continue;
@@ -1765,7 +1769,13 @@ async function checkStoredXss(forms: FormInfo[], baseOrigin: string): Promise<Sc
   return findings;
 }
 
-export async function runScan(targetUrl: string, crawlEnabled = false): Promise<ScanResult> {
+export async function runScan(
+  targetUrl: string,
+  crawlEnabled = false,
+  onProgress?: ProgressCallback,
+): Promise<ScanResult> {
+  const emit = onProgress ?? ((_e: Parameters<ProgressCallback>[0]) => {});
+
   const parsed = new URL(targetUrl);
   const hostname = parsed.hostname;
 
@@ -1774,6 +1784,7 @@ export async function runScan(targetUrl: string, crawlEnabled = false): Promise<
   let crawlSummary: CrawlSummary | null = null;
 
   if (crawlEnabled) {
+    emit({ type: "phase", message: "Launching browser spider...", pct: 3 });
     crawlResult = await crawl(targetUrl, { maxPages: 30, maxDepth: 3, concurrency: 5 });
     crawlSummary = {
       pagesVisited: crawlResult.pagesVisited,
@@ -1784,6 +1795,11 @@ export async function runScan(targetUrl: string, crawlEnabled = false): Promise<
       errors: crawlResult.errors,
       formsFound: crawlResult.forms.length,
     };
+    emit({
+      type: "phase",
+      message: `Spider complete — ${crawlResult.pagesVisited} pages, ${crawlResult.urlsWithParams.length} injection targets, ${crawlResult.forms.length} forms discovered`,
+      pct: 15,
+    });
   }
 
   let mainFetch: FetchResult;
@@ -1800,6 +1816,7 @@ export async function runScan(targetUrl: string, crawlEnabled = false): Promise<
   } catch {}
 
   // ── Core single-URL checks (always run on target) ────────────────────────
+  emit({ type: "phase", message: "Running core security checks (DNS, SSL, headers, methods, content)...", pct: 20 });
   const [dnsFindings, sslFindings, contentFindings, httpMethodFindings, sensitiveFileFindings, sqliFindings, xssFindings] = await Promise.all([
     checkDns(hostname),
     checkSsl(targetUrl, mainFetch),
@@ -1812,8 +1829,9 @@ export async function runScan(targetUrl: string, crawlEnabled = false): Promise<
 
   const headerFindings = checkSecurityHeaders(mainFetch.headers);
   const serverFindings = checkServerInfo(mainFetch.headers);
+  emit({ type: "phase", message: "Core checks complete", pct: 40 });
 
-  // ── Crawl-mode: run all injection checks on every discovered URL with params ──
+  // ── Crawl-mode: p-limit injection queue (SQLi + XSS × 4 checks per URL) ──
   const extraSqliFindings:     ScanFinding[] = [];
   const extraSqliTimeFindings: ScanFinding[] = [];
   const extraXssFindings:      ScanFinding[] = [];
@@ -1821,57 +1839,65 @@ export async function runScan(targetUrl: string, crawlEnabled = false): Promise<
   const storedXssFindings:     ScanFinding[] = [];
 
   if (crawlResult && crawlResult.urlsWithParams.length > 0) {
-    // Skip the root URL itself (already tested above), cap at 50 targets
     const additionalTargets = crawlResult.urlsWithParams
       .filter((u) => u.split("?")[0] !== targetUrl.split("?")[0])
       .slice(0, 50);
 
-    const seen = new Set<string>();
+    const total = additionalTargets.length;
+    const seen  = new Set<string>();
 
-    // Run in batches of 5
-    const BATCH = 5;
-    for (let i = 0; i < additionalTargets.length; i += BATCH) {
-      const batch = additionalTargets.slice(i, i + BATCH);
+    const tag = (findings: ScanFinding[], urlIdx: number, srcUrl: string): ScanFinding[] =>
+      findings
+        .filter((f) => f.status !== "pass")
+        .map((f) => ({
+          ...f,
+          id: `${f.id}-spider-${urlIdx}`,
+          title: `[Spider] ${f.title}`,
+          detail: f.detail ? `Found at: ${srcUrl}\n\n${f.detail}` : `Found at: ${srcUrl}`,
+        }))
+        .filter((f) => {
+          if (seen.has(f.id)) return false;
+          seen.add(f.id);
+          return true;
+        });
 
-      // For each URL: error-based SQLi + time-based SQLi + basic XSS + advanced XSS — all parallel
-      const perUrlResults = await Promise.all(
-        batch.map(async (srcUrl, batchIdx) => {
-          const urlIdx = i + batchIdx;
-          const [sqli, sqliTime, xss, xssAdv] = await Promise.all([
-            checkSqlInjection(srcUrl),
-            checkSqliTimeBased(srcUrl),
-            checkXss(srcUrl),
-            checkXssReflectedAdvanced(srcUrl),
-          ]);
+    if (total > 0) {
+      emit({
+        type: "phase",
+        message: `Starting injection pipeline: ${total} target${total > 1 ? "s" : ""} × 4 checks (concurrency: ${INJECTION_CONCURRENCY})`,
+        pct: 45,
+      });
 
-          // Tag findings with source URL + unique id suffix; keep only failures
-          const tag = (findings: ScanFinding[]): ScanFinding[] =>
-            findings
-              .filter((f) => f.status !== "pass")
-              .map((f) => ({
-                ...f,
-                id: `${f.id}-spider-${urlIdx}`,
-                title: `[Spider] ${f.title}`,
-                detail: f.detail
-                  ? `Found at: ${srcUrl}\n\n${f.detail}`
-                  : `Found at: ${srcUrl}`,
-              }))
-              .filter((f) => {
-                if (seen.has(f.id)) return false;
-                seen.add(f.id);
-                return true;
-              });
+      const injLimit = pLimit(INJECTION_CONCURRENCY);
 
-          return {
-            sqli:     tag(sqli),
-            sqliTime: tag(sqliTime),
-            xss:      tag(xss),
-            xssAdv:   tag(xssAdv),
-          };
-        })
+      const allResults = await Promise.all(
+        additionalTargets.map((srcUrl, urlIdx) =>
+          injLimit(async () => {
+            emit({ type: "target", current: urlIdx + 1, total, url: srcUrl, check: "SQLi (error) + SQLi (time-based) + XSS + XSS (advanced)" });
+
+            const [sqli, sqliTime, xss, xssAdv] = await Promise.all([
+              checkSqlInjection(srcUrl),
+              checkSqliTimeBased(srcUrl),
+              checkXss(srcUrl),
+              checkXssReflectedAdvanced(srcUrl),
+            ]);
+
+            const failures = [...sqli, ...sqliTime, ...xss, ...xssAdv].filter((f) => f.status !== "pass");
+            for (const f of failures) {
+              emit({ type: "finding", severity: f.severity, title: `[Spider] ${f.title}` });
+            }
+
+            return {
+              sqli:     tag(sqli,     urlIdx, srcUrl),
+              sqliTime: tag(sqliTime, urlIdx, srcUrl),
+              xss:      tag(xss,      urlIdx, srcUrl),
+              xssAdv:   tag(xssAdv,   urlIdx, srcUrl),
+            };
+          })
+        )
       );
 
-      for (const r of perUrlResults) {
+      for (const r of allResults) {
         extraSqliFindings.push(...r.sqli);
         extraSqliTimeFindings.push(...r.sqliTime);
         extraXssFindings.push(...r.xss);
@@ -1882,9 +1908,18 @@ export async function runScan(targetUrl: string, crawlEnabled = false): Promise<
 
   // ── Stored XSS: POST discovered forms with XSS probes ────────────────────
   if (crawlResult && crawlResult.forms.length > 0) {
+    const postForms = crawlResult.forms.filter((f) => f.method === "POST" && f.inputs.length > 0);
+    if (postForms.length > 0) {
+      emit({ type: "phase", message: `Testing stored XSS via ${postForms.length} POST form${postForms.length > 1 ? "s" : ""}...`, pct: 92 });
+    }
     const sf = await checkStoredXss(crawlResult.forms, targetUrl);
+    for (const f of sf) {
+      emit({ type: "finding", severity: f.severity, title: f.title });
+    }
     storedXssFindings.push(...sf);
   }
+
+  emit({ type: "phase", message: "Aggregating findings...", pct: 98 });
 
   const allFindings = [
     ...dnsFindings,
