@@ -1,0 +1,19 @@
+Please upgrade the entire simulation framework into a "Comprehensive Live Exploitation Engine" that interacts directly with the actual target URL across ALL vulnerability classes, replacing all remaining mock/static simulation code.
+
+Please implement active live exploitation handlers for each core vulnerability class as follows:
+
+1. Cross-Site Scripting (XSS) & Token Extraction:
+- Modify the exploit payload to actively search and extract data from `document.cookie`, `window.localStorage`, and `window.sessionStorage` (looking for keys like 'token', 'jwt', 'session', 'accessToken').
+- Spin up a Puppeteer instance targeting the live target URL to inject this payload. If the site leaves local storage or cookies unprotected, capture the REAL tokens and stream them to the C2 terminal. If blocked by CSP or HttpOnly, log: "[-] Exploitation Failed: Security defense detected."
+
+2. SQL Injection (SQLi) Live Data Extraction:
+- Instead of static text logs, if a parameter is flagged as vulnerable to SQLi, the exploit engine must fire real, safe extraction payloads (such as version fetching via `UNION SELECT` or boolean/time-based inference queries) against the live endpoint.
+- It must parse the live server response and extract actual system metadata (like database type, version, or current database user) and render it inside the terminal under "[!] EXPLOIT EVIDENCE EXFILTRATED".
+
+3. Clickjacking (Missing X-Frame-Options) Live Preview:
+- For the Clickjacking scenario, the dynamic attacker page must embed an actual `<iframe>` pointing directly to the live target URL.
+- Implement the interactive "Opacity Slider" control panel (0% to 100%) so the user can see their real live website loading inside the malicious overlay sandbox frame in real-time.
+
+4. Sensitive File Exposure Live Content Reader:
+- For discovered sensitive files (.env, .git/HEAD, configuration files), the backend must send a live request to fetch the file content from the target URL.
+- If the file is actually exposed (HTTP 200), read the first 5-10 lines of the real file body, sanitize/redact sensitive string values for safety, and output the actual code structure directly onto the Web Terminal. If it returns a 404 or a React-Router fallback page, log: "[-] Exploitation Failed: File not found or handled by client-side routing (False Positive Cleaned)."

