@@ -29,7 +29,10 @@ A personal web security scanner that lets you audit your own websites for common
 - `artifacts/api-server/src/lib/scanner.ts` — core scanning engine
 - `artifacts/api-server/src/routes/scans.ts` — scan API routes
 - `artifacts/api-server/src/routes/exploit.ts` — Exploit Playground backend (SSE streams, header audit, LFI probe, SQLi probe, XSS injection, session injection)
-- `artifacts/vuln-scanner/src/pages/exploit-playground.tsx` — Exploit Playground frontend
+- `artifacts/vuln-scanner/src/pages/exploit-playground.tsx` — Exploit Playground frontend (4 simulators)
+- `artifacts/vuln-scanner/src/pages/scan-detail.tsx` — scan results with inline "Exploit This →" buttons
+- `artifacts/vuln-scanner/src/components/attack-scenarios.tsx` — expandable exploit scenario panel inside each finding card
+- `artifacts/vuln-scanner/src/data/attack-scenarios.ts` — `SCENARIO_MAP`: maps finding IDs → exploit scenarios (simulationType, id, name, etc.)
 - `artifacts/vuln-scanner/src/` — React frontend
 
 ## Architecture decisions
@@ -41,6 +44,7 @@ A personal web security scanner that lets you audit your own websites for common
 - Exploit Playground uses SSE (`text/event-stream`) for live streaming of per-payload network logs — the frontend opens an `EventSource` and each HTTP probe result is pushed as a JSON event in real time.
 - All `/api/exploit/*` routes (except `/config`) are guarded by an optional `EXPLOIT_TOKEN` env var. If set, requests must pass `?token=` or `Authorization: Bearer`. Private/loopback IPs are blocked via `isPrivateHost()` to prevent SSRF.
 - Puppeteer is used in the Exploit Playground for XSS token injection and session capture — pages are launched with `evaluateOnNewDocument` fingerprint masking (UA, webdriver flag, plugins, canvas noise).
+- **Scanner → Exploit bridge**: `FindingCard` in `scan-detail.tsx` resolves the first matching scenario from `SCENARIO_MAP` for each finding. If one exists, an "Exploit This →" button is rendered inline on the card header. Clicking it navigates same-tab to `/exploit-playground/:findingId/:scenarioId?target=…&auto=1&returnTo=/scans/:id`. Each simulator reads `auto` and `returnTo` from the URL: `auto=1` triggers the probe automatically after 700ms; `returnTo` shows a "Back to scan" button in the simulator's top bar so the user can return without losing context.
 
 ## Product
 
@@ -57,6 +61,14 @@ A personal web security scanner that lets you audit your own websites for common
 - **Clickjacking Simulator** — overlays an invisible iframe over a decoy UI; includes a **Live Header Audit** that fetches real response headers and reports X-Frame-Options, CSP `frame-ancestors`, HSTS, and CORS misconfiguration.
 - **XSS Token Injection** — launches a Puppeteer page with fingerprint masking to harvest cookies, localStorage tokens, and DOM secrets from a target URL.
 - **Session Injection** — replays a captured session cookie in a headless browser and streams a C2-style log of what the injected session can access.
+
+### Scanner → Exploit Bridge
+- Every exploitable finding card in the scan results shows an **"Exploit This →"** button on the right side of its header row — no need to expand first.
+- Clicking navigates same-tab to the correct Exploit Playground module with the target URL pre-filled.
+- The exploit module **auto-fires** 700ms after arriving — no second click required.
+- A **"Back to scan"** button appears in every simulator's top bar so you can return to the scan report after the attack run.
+- Expanding a finding card also shows the full **Attack Scenarios** panel with all available exploit options for that vulnerability class.
+- To add a new exploitable finding: add an entry to `SCENARIO_MAP` in `artifacts/vuln-scanner/src/data/attack-scenarios.ts` with the finding ID as key and a `simulationType` of `clickjacking`, `xss-terminal`, `sqli-terminal`, or `sensitive-file-terminal`.
 
 ## Chạy local (macOS / Windows / Linux)
 
