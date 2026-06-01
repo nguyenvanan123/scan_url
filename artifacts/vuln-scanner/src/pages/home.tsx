@@ -6,7 +6,9 @@ import { Link, useLocation } from "wouter";
 import { formatDistanceToNow } from "date-fns";
 import {
   ShieldAlert, ShieldCheck, Activity, Target, Clock,
-  Trash2, AlertTriangle, Loader2, Scan, Globe2
+  Trash2, AlertTriangle, Loader2, Scan, Globe2,
+  BookOpen, ChevronDown, ChevronUp, Search, Lock,
+  FileCode, Crosshair, Terminal, Wrench
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -207,6 +209,9 @@ export default function Home() {
         )}
       </section>
 
+      {/* Usage Guide */}
+      <UsageGuide />
+
       {/* History */}
       <section>
         <Card className="border-border/60 shadow-sm">
@@ -329,6 +334,141 @@ function ScanButton({ isPending }: { isPending: boolean }) {
         </>
       )}
     </Button>
+  );
+}
+
+// ── Usage Guide ───────────────────────────────────────────────────────────────
+
+const GUIDE_STEPS = [
+  {
+    icon: <Search className="w-4 h-4 text-primary" />,
+    title: "Bước 1 — Nhập URL và bắt đầu quét",
+    color: "border-primary/30 bg-primary/5",
+    headerColor: "text-primary",
+    points: [
+      "Dán URL trang web cần kiểm tra vào ô trên cùng (phải bắt đầu bằng http:// hoặc https://)",
+      "Bật Spider Mode nếu muốn quét sâu hơn — hệ thống sẽ tự động dò và kiểm tra tất cả các trang con",
+      "Bấm SCAN — kết quả xuất hiện sau 10–30 giây tùy tốc độ server đích",
+    ],
+    tip: "Chỉ quét trang web của chính bạn hoặc trang bạn được phép kiểm tra bảo mật.",
+    tipKind: "info" as const,
+  },
+  {
+    icon: <ShieldAlert className="w-4 h-4 text-orange-500" />,
+    title: "Bước 2 — Đọc kết quả theo mức độ nguy hiểm",
+    color: "border-orange-500/30 bg-orange-500/5",
+    headerColor: "text-orange-500",
+    points: [
+      "Critical (đỏ đậm) — lỗ hổng nghiêm trọng, cần vá ngay",
+      "High (cam) — nguy hiểm cao, có thể bị khai thác trực tiếp",
+      "Medium (vàng) — cần khắc phục trong thời gian sớm",
+      "Low / Info (xanh / xám) — rủi ro thấp hoặc thông tin tham khảo",
+      "Bấm vào từng dòng để mở chi tiết: mô tả lỗi, bằng chứng, hướng vá",
+    ],
+    tip: null,
+    tipKind: "info" as const,
+  },
+  {
+    icon: <Wrench className="w-4 h-4 text-cyan-500" />,
+    title: "Bước 3 — Xem hướng dẫn vá lỗi theo công nghệ",
+    color: "border-cyan-500/30 bg-cyan-500/5",
+    headerColor: "text-cyan-500",
+    points: [
+      "Mỗi lỗ hổng có tab Remediation riêng — chọn đúng server bạn đang dùng: Nginx, Apache, Cloudflare, Express, Node.js…",
+      "Copy đoạn cấu hình và áp dụng trực tiếp, không cần tra cứu thêm",
+      "Có sẵn ví dụ cho cả frontend (meta tag) và backend (HTTP header)",
+    ],
+    tip: null,
+    tipKind: "info" as const,
+  },
+  {
+    icon: <Terminal className="w-4 h-4 text-amber-500" />,
+    title: "Bước 4 — Chạy PoC Terminal để xác minh lỗi",
+    color: "border-amber-500/30 bg-amber-500/5",
+    headerColor: "text-amber-500",
+    points: [
+      "Bấm \"Verify Live\" trong phần PoC / How to Exploit để chạy khai thác thử nghiệm thật",
+      "Terminal streaming theo 3 giai đoạn: Reconnaissance → Payload Injection → Data Exfiltration",
+      "Khối màu vàng Evidence hiện ra nếu lỗi thực sự bị khai thác được (token bị lấy, data bị đọc…)",
+      "Dùng kết quả này làm bằng chứng khi báo cáo cho team dev",
+    ],
+    tip: "Chỉ chạy PoC trên hệ thống bạn được cấp phép kiểm tra.",
+    tipKind: "warn" as const,
+  },
+  {
+    icon: <Crosshair className="w-4 h-4 text-purple-500" />,
+    title: "Bước 5 — Mô phỏng tấn công thực tế (Attack Scenarios)",
+    color: "border-purple-500/30 bg-purple-500/5",
+    headerColor: "text-purple-500",
+    points: [
+      "Với lỗi Missing X-Frame-Options hoặc Missing CSP, phần màu tím \"Real-World Attack Scenarios\" xuất hiện trong thẻ chi tiết",
+      "Chọn một kịch bản (Fake Lottery Bait, Keylogger Injection…) rồi bấm Launch This Scenario",
+      "Trang mô phỏng mở trong tab mới — cho thấy chính xác cách attacker lợi dụng lỗi đó",
+      "Với Clickjacking: kéo thanh opacity để chuyển giữa Victim View và Audit Mode — thấy iframe thật ẩn bên dưới",
+      "Với XSS: terminal tự chạy, hiển thị từng keystroke hoặc cookie bị đánh cắp theo thời gian thực",
+    ],
+    tip: null,
+    tipKind: "info" as const,
+  },
+];
+
+function UsageGuide() {
+  const [open, setOpen] = useState(false);
+
+  return (
+    <section>
+      <button
+        type="button"
+        onClick={() => setOpen((v) => !v)}
+        className="w-full flex items-center gap-3 text-left group"
+      >
+        <BookOpen className="w-4 h-4 text-muted-foreground group-hover:text-foreground transition-colors shrink-0" />
+        <span className="font-mono text-xs font-bold text-muted-foreground group-hover:text-foreground uppercase tracking-widest transition-colors flex-1">
+          Hướng dẫn sử dụng
+        </span>
+        {open
+          ? <ChevronUp className="w-4 h-4 text-muted-foreground shrink-0" />
+          : <ChevronDown className="w-4 h-4 text-muted-foreground shrink-0" />}
+      </button>
+
+      {open && (
+        <div className="mt-4 grid grid-cols-1 md:grid-cols-2 gap-3">
+          {GUIDE_STEPS.map((step, i) => (
+            <div
+              key={i}
+              className={`rounded-md border ${step.color} p-4 flex flex-col gap-2.5`}
+            >
+              {/* Header */}
+              <div className={`flex items-center gap-2 font-mono text-xs font-bold ${step.headerColor}`}>
+                {step.icon}
+                {step.title}
+              </div>
+
+              {/* Points */}
+              <ul className="space-y-1.5 pl-1">
+                {step.points.map((pt, j) => (
+                  <li key={j} className="flex items-start gap-2 text-[12px] text-foreground/80 font-sans leading-relaxed">
+                    <span className="mt-1.5 w-1 h-1 rounded-full bg-current shrink-0 opacity-50" />
+                    {pt}
+                  </li>
+                ))}
+              </ul>
+
+              {/* Tip */}
+              {step.tip && (
+                <div className={`text-[11px] font-mono px-2.5 py-1.5 rounded border leading-relaxed ${
+                  step.tipKind === "warn"
+                    ? "bg-yellow-500/10 border-yellow-500/20 text-yellow-600 dark:text-yellow-400"
+                    : "bg-primary/5 border-primary/20 text-primary"
+                }`}>
+                  ⚠ {step.tip}
+                </div>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </section>
   );
 }
 
