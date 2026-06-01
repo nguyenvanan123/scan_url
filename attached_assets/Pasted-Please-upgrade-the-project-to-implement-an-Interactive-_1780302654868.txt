@@ -1,0 +1,21 @@
+Please upgrade the project to implement an "Interactive Live Exploitation & Verification Terminal" directly on the Frontend for each vulnerability card. This will eliminate the inconvenience of manually copying commands to a local machine terminal.
+
+Here are the specific requirements for this upgrade:
+
+1. Frontend UI Component (Web Terminal):
+- Below the "POC / HOW TO EXPLOIT" section on each vulnerability card, add a prominent button labeled "Execute Live Proof of Concept".
+- When clicked, it should trigger a retro-styled console/terminal box immediately below it (black background, green/white monospaced text).
+- Show a live loading state or simulated typing effect (e.g., "admin@scanner:~# curl -sI http://target...") while waiting for the Backend response.
+
+2. Backend Execution Logic (Safe & Real-Time):
+- Create a new API endpoint `/api/verify-poc` that accepts the `vulnerabilityType` and the `targetUrl`.
+- For Configuration Flaws (e.g., Missing HSTS, Missing CSP, Site Not Using HTTPS): The Backend must programmatically execute the HTTP infrastructure request (simulating `curl -sI`). It should capture the exact Raw Response Headers sent by the target server and stream/return them back to the UI terminal.
+- For Code Injection Flaws (e.g., SQLi, XSS endpoints found by the Spider): The Backend must execute the safe verification payload against the dynamic URL parameter and return the explicit proof (e.g., "Server response delayed by 5002ms -> Time-based SQLi Confirmed" or "Payload reflected in DOM -> XSS Confirmed").
+
+3. Handling Network-Level Mocking (For Local Attacks):
+- For specific network-layer attacks that cannot technically run from a cloud container to a local network (like the `arpspoof` or `tcpdump` commands shown in the HTTPS downgrade attack POC): Instead of leaving the terminal empty, the Backend should trigger an interactive "Simulated Attack Environment Log". 
+- It must stream a realistic, real-time step-by-step stdout log showing how that specific exploit executes under local conditions (e.g., showing the ARP poisoning tables changing, catching mock plaintext login credentials passing through port 80) to serve as an educational and interactive demonstration of the risk.
+
+4. Terminal Output Presentation:
+- Ensure the terminal supports clean formatting, line breaks, and highlighted text (red for failed security controls, green for successful exploit confirmations).
+- Add a "Clear Terminal" and "Re-run Exploit" button for a fully interactive experience.

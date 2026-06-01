@@ -16,6 +16,7 @@ import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScanFinding, ScanFindingCategory } from "@workspace/api-zod";
+import { PocTerminal } from "@/components/poc-terminal";
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"] as const;
 
@@ -180,9 +181,10 @@ function LiveScanProgress({ scanId, url }: { scanId: number; url: string }) {
 
 interface FindingCardProps {
   finding: ScanFinding;
+  scanUrl: string;
 }
 
-function FindingCard({ finding }: FindingCardProps) {
+function FindingCard({ finding, scanUrl }: FindingCardProps) {
   const [expanded, setExpanded] = useState(false);
 
   const severityConfig = getSeverityConfig(finding.severity);
@@ -262,6 +264,9 @@ function FindingCard({ finding }: FindingCardProps) {
                   })}</code>
                 </pre>
               </div>
+
+              {/* Live execution terminal */}
+              <PocTerminal finding={finding} scanUrl={scanUrl} />
             </div>
           )}
         </div>
@@ -401,7 +406,7 @@ export default function ScanDetail() {
                   {severity} <span className="font-normal text-muted-foreground">({findings.length})</span>
                 </div>
                 <div className="space-y-2">
-                  {findings.map((f) => <FindingCard key={f.id} finding={f} />)}
+                  {findings.map((f) => <FindingCard key={f.id} finding={f} scanUrl={scan.url} />)}
                 </div>
               </section>
             );
