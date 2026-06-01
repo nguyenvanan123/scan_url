@@ -405,7 +405,7 @@ const GUIDE_STEPS = [
       "Chọn một kịch bản (Fake Lottery Bait, Keylogger Injection…) rồi bấm Launch This Scenario",
       "Trang mô phỏng mở trong tab mới — cho thấy chính xác cách attacker lợi dụng lỗi đó",
       "Với Clickjacking: kéo thanh opacity để chuyển giữa Victim View và Audit Mode — thấy iframe thật ẩn bên dưới",
-      "Với XSS: terminal tự chạy, hiển thị từng keystroke hoặc cookie bị đánh cắp theo thời gian thực",
+      "Với XSS: nhập email/password vào ô đăng nhập giả rồi bấm Sign In — terminal sẽ phát trực tiếp từng ký tự bị capture hoặc cookie bị đánh cắp ngay lập tức",
     ],
     tip: null,
     tipKind: "info" as const,
