@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from "react";
-import { useRoute } from "wouter";
+import { useRoute, useLocation } from "wouter";
 import { useGetScan, getGetScanQueryKey } from "@workspace/api-client-react";
 import { formatDistanceToNow } from "date-fns";
 import {
@@ -20,6 +20,7 @@ import { PocTerminal } from "@/components/poc-terminal";
 import { RemediationTabs } from "@/components/remediation-tabs";
 import { getClientRemediations } from "@/lib/remediation-data";
 import { AttackScenariosPanel } from "@/components/attack-scenarios";
+import { SCENARIO_MAP } from "@/data/attack-scenarios";
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"] as const;
 
@@ -185,34 +186,64 @@ function LiveScanProgress({ scanId, url }: { scanId: number; url: string }) {
 interface FindingCardProps {
   finding: ScanFinding;
   scanUrl: string;
+  scanId: number;
   serverInfo?: string | null;
 }
 
-function FindingCard({ finding, scanUrl, serverInfo }: FindingCardProps) {
+function FindingCard({ finding, scanUrl, scanId, serverInfo }: FindingCardProps) {
   const [expanded, setExpanded] = useState(false);
+  const [, navigate] = useLocation();
 
   const severityConfig = getSeverityConfig(finding.severity);
+
+  const exploitScenarios =
+    SCENARIO_MAP[finding.id] ??
+    (finding.id.startsWith("sqli-") && !["sqli-no-params", "sqli-not-detected"].includes(finding.id)
+      ? SCENARIO_MAP["sqli"] : undefined) ??
+    (finding.id.startsWith("sensitive-") && finding.id !== "sensitive-files-none"
+      ? SCENARIO_MAP["sensitive-file"] : undefined);
+  const firstScenario = exploitScenarios?.[0];
+
+  const handleExploitThis = () => {
+    if (!firstScenario) return;
+    const params = new URLSearchParams({ target: scanUrl, auto: "1", returnTo: `/scans/${scanId}` });
+    navigate(`/exploit-playground/${encodeURIComponent(finding.id)}/${encodeURIComponent(firstScenario.id)}?${params.toString()}`);
+  };
 
   return (
     <div
       className={`border-l-4 ${severityConfig.borderColor} ${severityConfig.bgColor} border border-r border-t border-b ${severityConfig.cardBorder} rounded-sm overflow-hidden transition-all`}
     >
-      <button
-        onClick={() => setExpanded((v) => !v)}
-        className="w-full text-left px-4 py-3 flex items-center gap-3 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
-      >
-        <span className="flex-shrink-0">{getStatusIcon(finding.status)}</span>
-        <span className="font-mono text-sm font-medium flex-1 min-w-0 truncate">{finding.title}</span>
-        <div className="flex items-center gap-2 flex-shrink-0">
-          <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded ${severityConfig.badgeBg} ${severityConfig.badgeText}`}>
-            {finding.severity.toUpperCase()}
-          </span>
-          {expanded
-            ? <ChevronUp className="w-4 h-4 text-muted-foreground" />
-            : <ChevronDown className="w-4 h-4 text-muted-foreground" />
-          }
-        </div>
-      </button>
+      <div className="flex items-stretch">
+        <button
+          onClick={() => setExpanded((v) => !v)}
+          className="flex-1 min-w-0 text-left px-4 py-3 flex items-center gap-3 hover:bg-black/5 dark:hover:bg-white/5 transition-colors"
+        >
+          <span className="flex-shrink-0">{getStatusIcon(finding.status)}</span>
+          <span className="font-mono text-sm font-medium flex-1 min-w-0 truncate">{finding.title}</span>
+          <div className="flex items-center gap-2 flex-shrink-0">
+            <span className={`text-[10px] font-mono font-bold px-2 py-0.5 rounded ${severityConfig.badgeBg} ${severityConfig.badgeText}`}>
+              {finding.severity.toUpperCase()}
+            </span>
+            {expanded
+              ? <ChevronUp className="w-4 h-4 text-muted-foreground" />
+              : <ChevronDown className="w-4 h-4 text-muted-foreground" />
+            }
+          </div>
+        </button>
+        {firstScenario && (
+          <button
+            type="button"
+            onClick={handleExploitThis}
+            title={`Auto-exploit: ${firstScenario.name}`}
+            className="border-l border-border/40 px-3 flex items-center gap-1.5 text-[10px] font-mono font-bold text-red-400/80 hover:text-red-300 hover:bg-red-500/10 transition-all whitespace-nowrap flex-shrink-0 group"
+          >
+            <Syringe className="w-3 h-3 group-hover:scale-110 transition-transform" />
+            <span className="hidden sm:inline">Exploit This →</span>
+            <span className="sm:hidden">→</span>
+          </button>
+        )}
+      </div>
 
       {expanded && (
         <div className="px-4 pb-4 space-y-3 border-t border-border/30">
@@ -292,7 +323,7 @@ function FindingCard({ finding, scanUrl, serverInfo }: FindingCardProps) {
           )}
 
           {/* Attack scenario simulator */}
-          <AttackScenariosPanel findingId={finding.id} scanUrl={scanUrl} />
+          <AttackScenariosPanel findingId={finding.id} scanUrl={scanUrl} scanId={scanId} />
         </div>
       )}
     </div>
@@ -441,7 +472,7 @@ export default function ScanDetail() {
                   {severity} <span className="font-normal text-muted-foreground">({findings.length})</span>
                 </div>
                 <div className="space-y-2">
-                  {findings.map((f) => <FindingCard key={f.id} finding={f} scanUrl={scan.url} serverInfo={scan.result?.serverInfo} />)}
+                  {findings.map((f) => <FindingCard key={f.id} finding={f} scanUrl={scan.url} scanId={id} serverInfo={scan.result?.serverInfo} />)}
                 </div>
               </section>
             );
