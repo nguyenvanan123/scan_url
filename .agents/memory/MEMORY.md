@@ -1,0 +1,1 @@
+- [Puppeteer on NixOS](puppeteer-nixos.md) — bundled Chrome missing libs; must use system `chromium` nix package + executablePath override.

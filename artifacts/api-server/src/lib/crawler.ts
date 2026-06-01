@@ -1,114 +1,110 @@
 /**
- * Web Crawler / Spider
+ * Web Crawler / Spider — Puppeteer-powered (Dynamic SPA Support)
  *
- * Performs a breadth-first crawl of the target domain, discovering:
- *   - All internal hyperlinks  (<a href>)
- *   - Form action endpoints    (<form action>)
- *   - Embedded JS file URLs    (<script src>)
- *   - URLs with query params   (priority targets for injection testing)
+ * Uses a headless Chromium browser to fully render pages (React / Vue / Angular)
+ * before extracting links. Falls back gracefully on per-page errors.
  *
- * Uses only Node.js built-ins (no external deps).
- * Respects maxPages and maxDepth to stay fast and targeted.
+ * Interface is identical to the original static crawler so the rest of the
+ * pipeline (scanner.ts, routes.ts, frontend) requires zero changes.
  */
 
-import https from "https";
-import http from "http";
+import puppeteer, { Browser, Page } from "puppeteer";
+import { execSync } from "child_process";
 import { URL } from "url";
 
+/** Locate the system Chromium executable (NixOS / standard Linux). */
+function findChromiumExecutable(): string | undefined {
+  const candidates = [
+    "chromium",
+    "chromium-browser",
+    "google-chrome",
+    "google-chrome-stable",
+  ];
+  for (const bin of candidates) {
+    try {
+      const path = execSync(`which ${bin} 2>/dev/null`, { encoding: "utf8" }).trim();
+      if (path) return path;
+    } catch {}
+  }
+  return undefined; // Fall back to puppeteer's bundled Chrome
+}
+
+// ── Public types ─────────────────────────────────────────────────────────────
+
 export interface FormInfo {
-  action: string;   // absolute URL of the form endpoint
-  method: string;   // "GET" | "POST"
-  inputs: string[]; // input/select/textarea name attributes
+  action: string;
+  method: string;
+  inputs: string[];
 }
 
 export interface CrawlResult {
-  /** All discovered internal URLs (deduplicated, normalised) */
   urls: string[];
-  /** Subset of urls that carry query parameters — priority for injection testing */
   urlsWithParams: string[];
-  /** Discovered form endpoints */
   forms: FormInfo[];
-  /** JS files embedded on crawled pages */
   jsFiles: string[];
-  /** How many pages were actually visited */
   pagesVisited: number;
-  /** Errors encountered (soft — crawl continues on error) */
   errors: string[];
 }
 
 export interface CrawlOptions {
-  /** Maximum number of pages to visit (default: 30) */
   maxPages?: number;
-  /** Maximum link depth from the seed URL (default: 3) */
   maxDepth?: number;
-  /** Request timeout in ms per page (default: 6000) */
   timeoutMs?: number;
-  /** Max concurrent fetches (default: 5) */
+  /** Max concurrent browser tabs (default: 2 — conservative for container memory) */
   concurrency?: number;
 }
 
-// ── HTML extraction helpers ──────────────────────────────────────────────────
+// ── Internal types ────────────────────────────────────────────────────────────
 
-/** Extract all attribute values for a given attr across all matching tags. */
-function extractAttr(html: string, tag: string, attr: string): string[] {
-  const results: string[] = [];
-  // Match opening tags only, multi-line safe
-  const tagRe = new RegExp(`<${tag}[^>]*>`, "gi");
-  let tagMatch: RegExpExecArray | null;
-  while ((tagMatch = tagRe.exec(html)) !== null) {
-    const tagStr = tagMatch[0];
-    // Extract attr="..." or attr='...' or attr=... (unquoted)
-    const attrRe = new RegExp(`${attr}\\s*=\\s*(?:"([^"]*)"|'([^']*)'|([^\\s>]+))`, "i");
-    const m = attrRe.exec(tagStr);
-    if (m) {
-      const val = (m[1] ?? m[2] ?? m[3] ?? "").trim();
-      if (val) results.push(val);
-    }
-  }
-  return results;
+interface PageData {
+  hrefs: string[];
+  forms: Array<{ action: string; method: string; inputs: string[] }>;
+  scripts: string[];
+  finalUrl: string;
 }
 
-/** Extract <form> details including action, method, and input names. */
-function extractForms(html: string): Array<{ action: string; method: string; inputs: string[] }> {
-  const forms: Array<{ action: string; method: string; inputs: string[] }> = [];
-  const formRe = /<form([^>]*)>([\s\S]*?)<\/form>/gi;
-  let fm: RegExpExecArray | null;
-  while ((fm = formRe.exec(html)) !== null) {
-    const attrs = fm[1];
-    const body = fm[2];
+// ── Page pool ─────────────────────────────────────────────────────────────────
 
-    const actionM = /action\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(attrs);
-    const methodM = /method\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(attrs);
+class PagePool {
+  private available: Page[] = [];
+  private waitQueue: Array<(p: Page) => void> = [];
 
-    const action = (actionM?.[1] ?? actionM?.[2] ?? actionM?.[3] ?? "").trim();
-    const method = (methodM?.[1] ?? methodM?.[2] ?? methodM?.[3] ?? "GET").trim().toUpperCase();
-
-    // Extract input/select/textarea names from form body
-    const inputRe = /<(?:input|select|textarea)([^>]*)>/gi;
-    const inputs: string[] = [];
-    let im: RegExpExecArray | null;
-    while ((im = inputRe.exec(body)) !== null) {
-      const nameM = /name\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(im[1]);
-      const typeM = /type\s*=\s*(?:"([^"]*)"|'([^']*)'|([^\s>]+))/i.exec(im[1]);
-      const name = (nameM?.[1] ?? nameM?.[2] ?? nameM?.[3] ?? "").trim();
-      const type = (typeM?.[1] ?? typeM?.[2] ?? typeM?.[3] ?? "text").trim().toLowerCase();
-      if (name && type !== "hidden" && type !== "submit" && type !== "button" && type !== "image") {
-        inputs.push(name);
-      }
-    }
-
-    if (action) forms.push({ action, method, inputs });
+  seed(pages: Page[]): void {
+    this.available = [...pages];
   }
-  return forms;
+
+  checkout(): Promise<Page> {
+    if (this.available.length > 0) {
+      return Promise.resolve(this.available.pop()!);
+    }
+    return new Promise<Page>((resolve) => {
+      this.waitQueue.push(resolve);
+    });
+  }
+
+  checkin(page: Page): void {
+    if (this.waitQueue.length > 0) {
+      this.waitQueue.shift()!(page);
+    } else {
+      this.available.push(page);
+    }
+  }
 }
 
-// ── URL normalisation ────────────────────────────────────────────────────────
+// ── URL helpers ───────────────────────────────────────────────────────────────
 
-/** Resolve a potentially relative href against a base URL. Returns null if invalid/external. */
+function normalise(url: URL): string {
+  const u = new URL(url.href);
+  u.hostname = u.hostname.toLowerCase();
+  if (u.pathname.length > 1 && u.pathname.endsWith("/")) {
+    u.pathname = u.pathname.slice(0, -1);
+  }
+  u.hash = "";
+  return u.href;
+}
+
 function resolveInternal(href: string, base: URL, origin: string): string | null {
   href = href.trim();
-
-  // Skip anchors, javascript, mailto, tel, data
   if (
     !href ||
     href.startsWith("#") ||
@@ -120,204 +116,234 @@ function resolveInternal(href: string, base: URL, origin: string): string | null
 
   try {
     const resolved = new URL(href, base.href);
-
-    // Only follow same origin
     if (resolved.origin !== origin) return null;
-
-    // Drop fragment
     resolved.hash = "";
-
     return resolved.href;
   } catch {
     return null;
   }
 }
 
-/** Normalise a URL for deduplication (strip trailing slash on path, lowercase host). */
-function normalise(url: URL): string {
-  const u = new URL(url.href);
-  u.hostname = u.hostname.toLowerCase();
-  if (u.pathname.length > 1 && u.pathname.endsWith("/")) {
-    u.pathname = u.pathname.slice(0, -1);
-  }
-  u.hash = "";
-  return u.href;
+// ── Puppeteer page setup ──────────────────────────────────────────────────────
+
+async function preparePage(browser: Browser): Promise<Page> {
+  const page = await browser.newPage();
+
+  // Block heavy resources — we only need the rendered DOM
+  await page.setRequestInterception(true);
+  page.on("request", (req) => {
+    const type = req.resourceType();
+    if (["image", "media", "font"].includes(type)) {
+      req.abort();
+    } else {
+      req.continue();
+    }
+  });
+
+  // Suppress console noise from the target page
+  page.on("console", () => {});
+  page.on("pageerror", () => {});
+
+  return page;
 }
 
-// ── HTTP fetch (shared with scanner) ────────────────────────────────────────
+// ── Core page fetch ───────────────────────────────────────────────────────────
 
-function fetchPage(url: string, timeoutMs: number): Promise<{ body: string; contentType: string }> {
-  return new Promise((resolve, reject) => {
-    let parsed: URL;
-    try { parsed = new URL(url); } catch (e) { return reject(e); }
+async function fetchPageData(
+  page: Page,
+  url: string,
+  timeoutMs: number,
+  origin: string
+): Promise<PageData> {
+  // Navigate and wait for the SPA to fully render
+  await page.goto(url, {
+    waitUntil: "networkidle2",
+    timeout: timeoutMs,
+  });
 
-    const isHttps = parsed.protocol === "https:";
-    const lib = isHttps ? https : http;
+  const finalUrl = page.url();
 
-    const options: https.RequestOptions = {
-      method: "GET",
-      host: parsed.hostname,
-      port: parsed.port || (isHttps ? 443 : 80),
-      path: parsed.pathname + parsed.search,
-      headers: {
-        "User-Agent": "Mozilla/5.0 (compatible; SecurityScanner/1.0)",
-        Accept: "text/html,*/*;q=0.8",
-      },
-      rejectUnauthorized: false,
-    };
+  // Extract everything from the live DOM — catches React/Vue rendered content
+  const data = await page.evaluate((pageOrigin) => {
+    const hrefs: string[] = [];
+    const scripts: string[] = [];
+    const forms: Array<{ action: string; method: string; inputs: string[] }> = [];
 
-    const req = lib.request(options, (res) => {
-      // Follow one redirect
-      if (res.statusCode && [301, 302, 303, 307, 308].includes(res.statusCode) && res.headers.location) {
-        req.destroy();
-        fetchPage(res.headers.location, timeoutMs).then(resolve).catch(reject);
-        return;
-      }
-
-      const contentType = (res.headers["content-type"] ?? "").toLowerCase();
-
-      // Only read HTML pages
-      if (!contentType.includes("text/html") && !contentType.includes("application/xhtml")) {
-        res.resume();
-        return resolve({ body: "", contentType });
-      }
-
-      let body = "";
-      res.on("data", (chunk) => { if (body.length < 300_000) body += chunk; });
-      res.on("end", () => resolve({ body, contentType }));
+    // All anchor tags — includes router-rendered links
+    document.querySelectorAll("a[href]").forEach((el) => {
+      const href = el.getAttribute("href");
+      if (href) hrefs.push(href);
     });
 
-    req.setTimeout(timeoutMs, () => { req.destroy(); reject(new Error("Timeout")); });
-    req.on("error", reject);
-    req.end();
-  });
+    // Script tags
+    document.querySelectorAll("script[src]").forEach((el) => {
+      const src = el.getAttribute("src");
+      if (src) scripts.push(src);
+    });
+
+    // Forms — including dynamically rendered forms in SPAs
+    document.querySelectorAll("form").forEach((form) => {
+      const inputs: string[] = [];
+      form.querySelectorAll("input, select, textarea").forEach((input) => {
+        const name = input.getAttribute("name");
+        const type = (input.getAttribute("type") || "text").toLowerCase();
+        if (name && !["hidden", "submit", "button", "image", "reset"].includes(type)) {
+          inputs.push(name);
+        }
+      });
+      forms.push({
+        action: form.getAttribute("action") || "",
+        method: (form.getAttribute("method") || "GET").toUpperCase(),
+        inputs,
+      });
+    });
+
+    // Also scrape data-href / ng-href / :href attributes (common SPA patterns)
+    document.querySelectorAll("[data-href], [ng-href]").forEach((el) => {
+      const href = el.getAttribute("data-href") || el.getAttribute("ng-href");
+      if (href) hrefs.push(href);
+    });
+
+    return { hrefs, scripts, forms };
+  }, origin);
+
+  return { ...data, finalUrl };
 }
 
-// ── Concurrency limiter ──────────────────────────────────────────────────────
-
-async function runWithConcurrency<T>(
-  tasks: Array<() => Promise<T>>,
-  concurrency: number
-): Promise<T[]> {
-  const results: T[] = [];
-  let idx = 0;
-
-  async function worker() {
-    while (idx < tasks.length) {
-      const i = idx++;
-      results[i] = await tasks[i]();
-    }
-  }
-
-  await Promise.all(Array.from({ length: Math.min(concurrency, tasks.length) }, worker));
-  return results;
-}
-
-// ── Main crawler ─────────────────────────────────────────────────────────────
+// ── Main crawler ──────────────────────────────────────────────────────────────
 
 export async function crawl(targetUrl: string, options: CrawlOptions = {}): Promise<CrawlResult> {
   const {
     maxPages   = 30,
     maxDepth   = 3,
-    timeoutMs  = 6000,
-    concurrency = 5,
+    timeoutMs  = 15_000,
+    concurrency = 2, // Conservative default: each tab ~80-120MB RAM
   } = options;
 
   let seedUrl: URL;
-  try { seedUrl = new URL(targetUrl); } catch {
-    return { urls: [], urlsWithParams: [], forms: [], jsFiles: [], pagesVisited: 0, errors: [`Invalid URL: ${targetUrl}`] };
+  try {
+    seedUrl = new URL(targetUrl);
+  } catch {
+    return {
+      urls: [],
+      urlsWithParams: [],
+      forms: [],
+      jsFiles: [],
+      pagesVisited: 0,
+      errors: [`Invalid URL: ${targetUrl}`],
+    };
   }
 
   const origin = seedUrl.origin;
-  const visited = new Set<string>(); // normalised URLs already fetched
-  const queued  = new Set<string>(); // normalised URLs already enqueued
-  const allUrls  = new Set<string>(); // all discovered internal URLs
+  const seed   = normalise(seedUrl);
+
+  const visited = new Set<string>();
+  const queued  = new Set<string>([seed]);
+  const allUrls = new Set<string>([seed]);
   const allForms: FormInfo[] = [];
-  const allJsFiles = new Set<string>();
-  const errors: string[] = [];
+  const allJs    = new Set<string>();
+  const errors: string[]     = [];
 
-  // BFS queue entries: [url, depth]
-  const seed = normalise(seedUrl);
   const queue: Array<[string, number]> = [[seed, 0]];
-  queued.add(seed);
-  allUrls.add(seed);
 
-  while (queue.length > 0 && visited.size < maxPages) {
-    // Take up to `concurrency` items from the queue
-    const batch = queue.splice(0, concurrency).filter(([u]) => !visited.has(u));
-    if (batch.length === 0) continue;
+  let browser: Browser | null = null;
 
-    const tasks = batch.map(([pageUrl, depth]) => async (): Promise<void> => {
-      visited.add(pageUrl);
-      try {
-        const { body } = await fetchPage(pageUrl, timeoutMs);
-        if (!body) return; // non-HTML resource
+  try {
+    const executablePath = findChromiumExecutable();
+    browser = await puppeteer.launch({
+      headless: true,
+      // Prefer system Chromium (NixOS has correct rpath); fall back to bundled Chrome
+      ...(executablePath ? { executablePath } : {}),
+      args: [
+        "--no-sandbox",
+        "--disable-setuid-sandbox",
+        "--disable-dev-shm-usage",   // use /tmp instead of /dev/shm
+        "--disable-gpu",
+        "--no-first-run",
+        "--no-zygote",
+        "--disable-extensions",
+        "--disable-background-networking",
+        "--disable-default-apps",
+        "--disable-sync",
+        "--disable-features=VizDisplayCompositor",
+        "--mute-audio",
+      ],
+    });
 
-        const baseUrl = new URL(pageUrl);
+    // Pre-create page pool
+    const pool = new PagePool();
+    const poolSize = Math.min(concurrency, maxPages);
+    const pages: Page[] = await Promise.all(
+      Array.from({ length: poolSize }, () => preparePage(browser!))
+    );
+    pool.seed(pages);
 
-        // ── Extract <a href> ──────────────────────────────────────────────
-        const hrefs = extractAttr(body, "a", "href");
-        for (const href of hrefs) {
-          const resolved = resolveInternal(href, baseUrl, origin);
-          if (!resolved) continue;
+    // BFS loop
+    while (queue.length > 0 && visited.size < maxPages) {
+      const batch = queue.splice(0, poolSize).filter(([u]) => !visited.has(u));
+      if (batch.length === 0) continue;
 
-          const normResolved = normalise(new URL(resolved));
-          allUrls.add(normResolved);
+      await Promise.all(
+        batch.map(async ([pageUrl, depth]) => {
+          visited.add(pageUrl);
+          const page = await pool.checkout();
 
-          if (!queued.has(normResolved) && depth + 1 <= maxDepth && visited.size + queue.length < maxPages * 2) {
-            queued.add(normResolved);
-            queue.push([normResolved, depth + 1]);
-          }
-        }
-
-        // ── Extract <form action> ─────────────────────────────────────────
-        const rawForms = extractForms(body);
-        for (const f of rawForms) {
-          const resolvedAction = resolveInternal(f.action || pageUrl, baseUrl, origin);
-          if (resolvedAction) {
-            const normAction = normalise(new URL(resolvedAction));
-            allUrls.add(normAction);
-            allForms.push({ action: normAction, method: f.method, inputs: f.inputs });
-          }
-        }
-
-        // ── Extract <script src> JS files ─────────────────────────────────
-        const scripts = extractAttr(body, "script", "src");
-        for (const src of scripts) {
           try {
-            const resolved = new URL(src, baseUrl.href);
-            allJsFiles.add(resolved.href);
-          } catch {}
-        }
+            const data = await fetchPageData(page, pageUrl, timeoutMs, origin);
+            const baseUrl = new URL(data.finalUrl);
 
-        // ── Extract URLs from inline JS (simple pattern matching) ─────────
-        const jsUrlPattern = /['"`](\/([\w/.-]+\?[^'"`\s]+))['"` ]/g;
-        let jm: RegExpExecArray | null;
-        while ((jm = jsUrlPattern.exec(body)) !== null) {
-          try {
-            const inlineUrl = new URL(jm[1], baseUrl.href);
-            if (inlineUrl.origin === origin) {
-              const norm = normalise(inlineUrl);
+            // Process discovered hrefs
+            for (const href of data.hrefs) {
+              const resolved = resolveInternal(href, baseUrl, origin);
+              if (!resolved) continue;
+              const norm = normalise(new URL(resolved));
               allUrls.add(norm);
-              if (!queued.has(norm)) {
+              if (!queued.has(norm) && depth + 1 <= maxDepth && visited.size + queue.length < maxPages * 2) {
                 queued.add(norm);
-                // Only enqueue if it has params (potential injection target)
-                if (inlineUrl.searchParams.size > 0 || inlineUrl.search.length > 1) {
+                queue.push([norm, depth + 1]);
+              }
+            }
+
+            // Process forms
+            for (const f of data.forms) {
+              const actionHref = f.action || pageUrl;
+              const resolved = resolveInternal(actionHref, baseUrl, origin);
+              if (resolved) {
+                const norm = normalise(new URL(resolved));
+                allUrls.add(norm);
+                allForms.push({ action: norm, method: f.method, inputs: f.inputs });
+                // Form actions with GET method are injectable targets — queue them
+                if (f.method === "GET" && !queued.has(norm)) {
+                  queued.add(norm);
                   queue.push([norm, depth + 1]);
                 }
               }
             }
-          } catch {}
-        }
-      } catch (err: any) {
-        errors.push(`${pageUrl}: ${err.message ?? String(err)}`);
-      }
-    });
 
-    await runWithConcurrency(tasks, concurrency);
+            // Process script sources
+            for (const src of data.scripts) {
+              try {
+                allJs.add(new URL(src, baseUrl.href).href);
+              } catch {}
+            }
+          } catch (err: any) {
+            errors.push(`${pageUrl}: ${err.message ?? String(err)}`);
+          } finally {
+            // Reset page to blank to free memory before returning to pool
+            await page.goto("about:blank").catch(() => {});
+            pool.checkin(page);
+          }
+        })
+      );
+    }
+  } catch (err: any) {
+    errors.push(`Browser launch failed: ${err.message ?? String(err)}`);
+  } finally {
+    if (browser) {
+      await browser.close().catch(() => {});
+    }
   }
 
-  // Build final result
   const urlsArray = Array.from(allUrls).sort();
   const urlsWithParams = urlsArray.filter((u) => {
     try { return new URL(u).search.length > 1; } catch { return false; }
@@ -327,7 +353,7 @@ export async function crawl(targetUrl: string, options: CrawlOptions = {}): Prom
     urls: urlsArray,
     urlsWithParams,
     forms: allForms,
-    jsFiles: Array.from(allJsFiles),
+    jsFiles: Array.from(allJs),
     pagesVisited: visited.size,
     errors,
   };
