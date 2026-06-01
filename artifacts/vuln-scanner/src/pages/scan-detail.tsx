@@ -7,7 +7,7 @@ import {
   Info, ArrowLeft, Server, Lock, Globe,
   FileCode, CheckCircle2, XCircle, Activity,
   ChevronDown, ChevronUp, Search, FolderLock, Syringe,
-  Globe2, Link2, FormInput, Code2, Terminal
+  Globe2, Link2, FormInput, Code2, Terminal, Download
 } from "lucide-react";
 import { Link } from "wouter";
 
@@ -372,6 +372,17 @@ export default function ScanDetail() {
             SCAN #{scan.id} &bull; {formatDistanceToNow(new Date(scan.createdAt), { addSuffix: true })}
           </div>
         </div>
+        {scan.status === "completed" && scan.result && (
+          <Button
+            variant="outline"
+            size="sm"
+            className="font-mono text-xs flex-shrink-0 h-8 mt-0.5"
+            onClick={() => window.open(`/api/scans/${scan.id}/export`, "_blank")}
+          >
+            <Download className="w-3 h-3 mr-1" />
+            Export
+          </Button>
+        )}
       </div>
 
       {/* Running state — live SSE progress */}

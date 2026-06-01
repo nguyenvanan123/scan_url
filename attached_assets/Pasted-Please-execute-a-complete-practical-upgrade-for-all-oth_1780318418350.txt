@@ -1,0 +1,17 @@
+Please execute a complete practical upgrade for all other vulnerability modules in the Exploit Playground. Replace all mock responses with actual active exploitation logic in the backend.
+
+1. Real SQL Injection (SQLi) Extraction Engine:
+- When the user clicks "SQLi Probe", the backend must perform active security testing by injecting real payloads into the target URL parameters (e.g., `id=1' AND 1=1`, `id=1' UNION SELECT 1,2,3,version()--`, `id=1; WAITFOR DELAY '0:0:5'--`).
+- Implement response parsing: If the target site is vulnerable, the backend must extract real metadata (Database type, Version, or active User) from the HTTP response body or measure the precise time delay using automated latency checks. Stream the actual extracted server data to the C2 Terminal.
+
+2. Real Path Traversal & Local File Inclusion (LFI) Validator:
+- For the LFI Probe, the backend must actively attempt to read system files from the target web server using traversal sequences (e.g., `/index.php?page=../../../../etc/passwd` or `?file=..\..\..\..\Windows\win.ini`).
+- The backend must check the HTTP response. If the target server improperly configures its file inclusion logic and leaks system lines, capture the actual text output and stream it directly to the dashboard. If blocked (403/404), log the exact HTTP restriction status.
+
+3. Real Clickjacking & CORS Misconfiguration Scanner:
+- Upgrade the scanner to perform live origin checks. Send an actual HTTP HEAD request to the target site and parse the headers in real-time.
+- Check for the explicit absence of `X-Frame-Options` and `Content-Security-Policy: frame-ancestors`. If missing, the frontend UI must dynamically generate a real HTML iFrame containing the target site to visually prove it can be hijacked.
+- Send cross-origin requests to test for `Access-Control-Allow-Origin: *` with credentials enabled. If misconfigured, log: "[!] CRITICAL: CORS misconfiguration detected. Data leakage possible."
+
+4. Real-time Raw Network Log Stream:
+- Refactor the backend log pipeline. Every line appearing on the Attacker's C2 Terminal must be bound to a real network event, displaying the exact HTTP Status Code (200, 302, 403, 500), payload sent, and time elapsed in milliseconds.

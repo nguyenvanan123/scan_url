@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { useForm } from "react-hook-form";
 import { zodResolver } from "@hookform/resolvers/zod";
 import * as z from "zod";
@@ -308,6 +308,9 @@ export default function Home() {
           </CardContent>
         </Card>
       </section>
+
+      {/* Scheduled Scans */}
+      <ScheduledScans />
     </div>
   );
 }
@@ -334,6 +337,158 @@ function ScanButton({ isPending }: { isPending: boolean }) {
         </>
       )}
     </Button>
+  );
+}
+
+// ── Scheduled Scans ───────────────────────────────────────────────────────────
+
+interface Schedule {
+  id: number;
+  url: string;
+  intervalHours: number;
+  enabled: boolean;
+  lastRunAt: string | null;
+  nextRunAt: string;
+  createdAt: string;
+}
+
+function ScheduledScans() {
+  const [schedules, setSchedules] = useState<Schedule[]>([]);
+  const [loading, setLoading]     = useState(true);
+  const [url, setUrl]             = useState("");
+  const [intervalHours, setIntervalHours] = useState(24);
+  const [adding, setAdding]       = useState(false);
+  const { toast }                 = useToast();
+
+  useEffect(() => {
+    fetch("/api/schedules")
+      .then((r) => r.json())
+      .then((data) => setSchedules(Array.isArray(data) ? data : []))
+      .catch(() => {})
+      .finally(() => setLoading(false));
+  }, []);
+
+  const add = async () => {
+    if (!url) return;
+    setAdding(true);
+    try {
+      const r = await fetch("/api/schedules", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ url, intervalHours }),
+      });
+      if (!r.ok) { const e = await r.json(); throw new Error(e.error ?? "Failed"); }
+      const s: Schedule = await r.json();
+      setSchedules((prev) => [...prev, s]);
+      setUrl("");
+      toast({ title: "Schedule added", description: `${url} will be scanned every ${intervalHours}h` });
+    } catch (err: any) {
+      toast({ title: "Failed to add schedule", description: err.message, variant: "destructive" });
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  const remove = async (id: number) => {
+    await fetch(`/api/schedules/${id}`, { method: "DELETE" }).catch(() => {});
+    setSchedules((prev) => prev.filter((s) => s.id !== id));
+  };
+
+  const toggle = async (id: number) => {
+    const r = await fetch(`/api/schedules/${id}/toggle`, { method: "PATCH" }).catch(() => null);
+    if (r && r.ok) {
+      const updated: Schedule = await r.json();
+      setSchedules((prev) => prev.map((s) => (s.id === id ? updated : s)));
+    }
+  };
+
+  return (
+    <section>
+      <Card className="border-border/60 shadow-sm">
+        <CardHeader className="pb-3">
+          <CardTitle className="font-mono text-xs tracking-widest text-muted-foreground uppercase flex items-center gap-2">
+            <Clock className="w-4 h-4" />
+            Scheduled Scans
+          </CardTitle>
+        </CardHeader>
+        <CardContent className="pt-0 space-y-4">
+          <div className="flex gap-2 items-start">
+            <Input
+              value={url}
+              onChange={(e) => setUrl(e.target.value)}
+              placeholder="https://example.com"
+              className="flex-1 font-mono text-sm h-9"
+              onKeyDown={(e) => e.key === "Enter" && add()}
+            />
+            <select
+              value={intervalHours}
+              onChange={(e) => setIntervalHours(Number(e.target.value))}
+              className="h-9 px-3 rounded-md border border-input bg-background font-mono text-sm text-foreground"
+            >
+              <option value={1}>1h</option>
+              <option value={6}>6h</option>
+              <option value={12}>12h</option>
+              <option value={24}>24h</option>
+              <option value={48}>48h</option>
+            </select>
+            <Button size="sm" onClick={add} disabled={!url || adding} className="font-mono text-xs h-9 px-4">
+              {adding ? <Loader2 className="w-3.5 h-3.5 mr-1.5 animate-spin" /> : <Clock className="w-3.5 h-3.5 mr-1.5" />}
+              Schedule
+            </Button>
+          </div>
+
+          {loading ? (
+            <Skeleton className="h-12" />
+          ) : schedules.length === 0 ? (
+            <div className="text-center py-6 text-muted-foreground font-mono text-xs">
+              No scheduled scans — add a URL above
+            </div>
+          ) : (
+            <div className="space-y-2">
+              {schedules.map((s) => (
+                <div
+                  key={s.id}
+                  className={`flex items-center gap-3 p-3 rounded-md border transition-colors ${
+                    s.enabled ? "border-primary/30 bg-primary/5" : "border-border/50 bg-muted/20"
+                  }`}
+                >
+                  <button
+                    type="button"
+                    onClick={() => toggle(s.id)}
+                    title={s.enabled ? "Enabled — click to disable" : "Disabled — click to enable"}
+                    className={`flex-shrink-0 w-4 h-4 rounded-full border-2 transition-colors ${
+                      s.enabled ? "bg-primary border-primary" : "border-muted-foreground bg-transparent"
+                    }`}
+                  />
+                  <div className="flex-1 min-w-0">
+                    <div className="font-mono text-sm truncate" title={s.url}>{s.url}</div>
+                    <div className="font-mono text-[11px] text-muted-foreground">
+                      Every {s.intervalHours}h
+                      {s.nextRunAt && ` · Next: ${formatDistanceToNow(new Date(s.nextRunAt), { addSuffix: true })}`}
+                      {s.lastRunAt && ` · Last: ${formatDistanceToNow(new Date(s.lastRunAt), { addSuffix: true })}`}
+                    </div>
+                  </div>
+                  <Badge
+                    variant="outline"
+                    className={s.enabled ? "text-primary border-primary text-[10px] font-mono" : "text-muted-foreground border-muted text-[10px] font-mono"}
+                  >
+                    {s.enabled ? "ACTIVE" : "PAUSED"}
+                  </Badge>
+                  <Button
+                    variant="ghost"
+                    size="icon"
+                    className="h-7 w-7 hover:text-destructive flex-shrink-0"
+                    onClick={() => remove(s.id)}
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </Button>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+    </section>
   );
 }
 

@@ -703,6 +703,237 @@ safe = sanitizer.sanitize(user_input, tags: %w[b i ul li])`,
 // Alias stored-XSS to same remediations as reflected XSS
 REMEDIATION_MAP["injection-stored-xss"] = REMEDIATION_MAP["injection-xss"];
 
+// ── CORS remediations ─────────────────────────────────────────────────────────
+REMEDIATION_MAP["cors-wildcard"] = {
+  nginx:
+`# Restrict CORS to a specific trusted origin instead of wildcard
+# In nginx server{} block:
+add_header Access-Control-Allow-Origin "https://your-trusted-app.com" always;
+
+# For multiple allowed origins, use a map:
+map $http_origin $cors_origin {
+    default                          "";
+    "https://trusted-app.com"        $http_origin;
+    "https://other-trusted-app.com"  $http_origin;
+}
+server {
+    add_header Access-Control-Allow-Origin $cors_origin always;
+}`,
+  apache:
+`# Replace wildcard with specific trusted origins
+# In httpd.conf or .htaccess (requires mod_headers):
+<IfModule mod_headers.c>
+  Header always set Access-Control-Allow-Origin "https://your-trusted-app.com"
+</IfModule>
+
+# For dynamic origin validation, use SetEnvIf:
+SetEnvIf Origin "^https://trusted-app\\.com$" CORS_ORIGIN=$0
+Header always set Access-Control-Allow-Origin %{CORS_ORIGIN}e env=CORS_ORIGIN`,
+  nodejs:
+`// Restrict CORS to an explicit allowlist — never use wildcard for sensitive APIs
+import cors from 'cors';
+
+const allowedOrigins = [
+  'https://your-app.com',
+  'https://other-trusted.com',
+];
+
+app.use(cors({
+  origin: (origin, callback) => {
+    if (!origin || allowedOrigins.includes(origin)) {
+      callback(null, true);
+    } else {
+      callback(new Error('Not allowed by CORS'));
+    }
+  },
+  credentials: true,
+}));`,
+  cloudflare:
+`# Cloudflare Transform Rules → Modify Response Header
+# Replace the existing Access-Control-Allow-Origin header:
+# Rules → Transform Rules → Create Rule → Modify Response Header
+# Action: Set  |  Name: Access-Control-Allow-Origin
+# Value: https://your-trusted-app.com
+#
+# For dynamic origin validation, use Cloudflare Workers:
+# addEventListener('fetch', event => {
+#   const origin = event.request.headers.get('Origin');
+#   const allowed = ['https://your-app.com'];
+#   if (allowed.includes(origin)) {
+#     response.headers.set('Access-Control-Allow-Origin', origin);
+#   }
+# });`,
+};
+REMEDIATION_MAP["cors-reflect-origin"] = REMEDIATION_MAP["cors-wildcard"];
+REMEDIATION_MAP["cors-credentials-wildcard"] = REMEDIATION_MAP["cors-wildcard"];
+
+// ── Cookie security remediations ──────────────────────────────────────────────
+REMEDIATION_MAP["cookie-no-httponly"] = {
+  nodejs:
+`// Set HttpOnly on all session/auth cookies
+// With Express + express-session:
+app.use(session({
+  secret: process.env.SESSION_SECRET,
+  cookie: {
+    httpOnly: true,   // ← prevents JavaScript access (document.cookie)
+    secure: true,     // ← HTTPS only
+    sameSite: 'lax',  // ← CSRF protection
+    maxAge: 24 * 60 * 60 * 1000,
+  },
+}));
+
+// With express-cookie directly:
+res.cookie('session', value, {
+  httpOnly: true,
+  secure: process.env.NODE_ENV === 'production',
+  sameSite: 'lax',
+});`,
+  php:
+`<?php
+// Set HttpOnly flag on all cookies
+// In php.ini (applies globally):
+session.cookie_httponly = 1
+session.cookie_secure   = 1
+session.cookie_samesite = Lax
+
+// Or programmatically for session cookie:
+session_set_cookie_params([
+    'lifetime' => 86400,
+    'path'     => '/',
+    'secure'   => true,
+    'httponly' => true,     // ← key flag
+    'samesite' => 'Lax',
+]);
+session_start();
+
+// For custom cookies:
+setcookie('auth', $value, [
+    'httponly' => true,
+    'secure'   => true,
+    'samesite' => 'Lax',
+]);`,
+  java:
+`// Spring Boot — configure session cookie in application.properties:
+// server.servlet.session.cookie.http-only=true
+// server.servlet.session.cookie.secure=true
+// server.servlet.session.cookie.same-site=lax
+
+// Or programmatically:
+@Configuration
+public class SessionConfig {
+    @Bean
+    public TomcatServletWebServerFactory servletContainer() {
+        TomcatServletWebServerFactory factory = new TomcatServletWebServerFactory();
+        factory.addContextCustomizers(context -> {
+            context.setUseHttpOnly(true);
+        });
+        return factory;
+    }
+}`,
+  python:
+`# Django — settings.py:
+SESSION_COOKIE_HTTPONLY = True    # ← prevents JS access
+SESSION_COOKIE_SECURE   = True    # ← HTTPS only
+SESSION_COOKIE_SAMESITE = 'Lax'  # ← CSRF protection
+CSRF_COOKIE_HTTPONLY    = True
+
+# Flask:
+app.config.update(
+    SESSION_COOKIE_HTTPONLY=True,
+    SESSION_COOKIE_SECURE=True,
+    SESSION_COOKIE_SAMESITE='Lax',
+)`,
+};
+REMEDIATION_MAP["cookie-no-secure"]        = REMEDIATION_MAP["cookie-no-httponly"];
+REMEDIATION_MAP["cookie-no-samesite"]      = REMEDIATION_MAP["cookie-no-httponly"];
+REMEDIATION_MAP["cookie-samesite-none-insecure"] = REMEDIATION_MAP["cookie-no-httponly"];
+
+// ── Open redirect remediations ────────────────────────────────────────────────
+REMEDIATION_MAP["open-redirect"] = {
+  nodejs:
+`// Validate redirect destinations against an allowlist
+// Never redirect to arbitrary user-supplied URLs
+function isSafeRedirect(url: string, allowedOrigins: string[]): boolean {
+  try {
+    const parsed = new URL(url, 'https://your-app.com');
+    return allowedOrigins.includes(parsed.origin);
+  } catch {
+    return false;
+  }
+}
+
+// In your route handler:
+app.get('/redirect', (req, res) => {
+  const { url } = req.query;
+  const allowed = ['https://your-app.com', 'https://partner-site.com'];
+
+  if (!url || !isSafeRedirect(String(url), allowed)) {
+    return res.status(400).send('Invalid redirect destination');
+  }
+  res.redirect(String(url));
+});
+
+// Better: use relative paths only — strip the origin completely
+app.get('/redirect', (req, res) => {
+  const { next } = req.query;
+  const safePath = String(next || '/').replace(/^[\\/]+/, '/');
+  if (!safePath.startsWith('/') || safePath.startsWith('//')) {
+    return res.redirect('/');
+  }
+  res.redirect(safePath);
+});`,
+  php:
+`<?php
+// Validate redirect — only allow relative paths or pre-approved domains
+function safe_redirect(string $url): string {
+    $allowed = ['https://your-app.com', 'https://trusted-site.com'];
+    try {
+        $parsed = parse_url($url);
+        if (!isset($parsed['host'])) {
+            // Relative URL — strip leading slashes to prevent protocol-relative
+            return '/' . ltrim($url, '/');
+        }
+        $origin = ($parsed['scheme'] ?? 'https') . '://' . $parsed['host'];
+        if (in_array($origin, $allowed, true)) return $url;
+    } catch (Exception $e) {}
+    return '/'; // fallback to home
+}
+header('Location: ' . safe_redirect($_GET['redirect'] ?? '/'));`,
+  python:
+`# Django — never redirect to raw user input
+from urllib.parse import urlparse
+from django.shortcuts import redirect
+
+def safe_redirect_view(request):
+    next_url = request.GET.get('next', '/')
+    # Allow only relative URLs (no scheme/host)
+    parsed = urlparse(next_url)
+    if parsed.netloc or parsed.scheme:
+        next_url = '/'  # reject absolute URLs
+    return redirect(next_url)
+
+# Or use Django's built-in is_safe_url:
+from django.utils.http import url_has_allowed_host_and_scheme
+if not url_has_allowed_host_and_scheme(next_url, allowed_hosts={request.get_host()}):
+    next_url = settings.LOGIN_REDIRECT_URL`,
+  java:
+`// Spring — restrict redirects to relative paths or allowed domains
+@GetMapping("/redirect")
+public ResponseEntity<Void> redirect(@RequestParam String url) {
+    List<String> allowedHosts = List.of("your-app.com", "trusted-site.com");
+    try {
+        URI uri = new URI(url);
+        if (uri.isAbsolute() && !allowedHosts.contains(uri.getHost())) {
+            return ResponseEntity.badRequest().build();
+        }
+        return ResponseEntity.status(HttpStatus.FOUND)
+                             .location(uri).build();
+    } catch (URISyntaxException e) {
+        return ResponseEntity.badRequest().build();
+    }
+}`,
+};
+
 /**
  * Post-processes findings to attach structured technology-specific remediations.
  * Matches by exact finding ID first, then by category prefix for injection findings.
@@ -715,9 +946,14 @@ function withRemediations(findings: ScanFinding[]): ScanFinding[] {
       remediations = REMEDIATION_MAP[f.id];
     } else if (f.category === "injection") {
       // Match by prefix: injection-sqli-* → injection-sqli, injection-xss-* / injection-stored-xss-* → injection-xss
-      if (f.id.includes("sqli"))       remediations = REMEDIATION_MAP["injection-sqli"] ?? null;
-      else if (f.id.includes("stored")) remediations = REMEDIATION_MAP["injection-stored-xss"] ?? null;
-      else if (f.id.includes("xss"))   remediations = REMEDIATION_MAP["injection-xss"] ?? null;
+      if (f.id.includes("sqli"))              remediations = REMEDIATION_MAP["injection-sqli"] ?? null;
+      else if (f.id.includes("stored"))       remediations = REMEDIATION_MAP["injection-stored-xss"] ?? null;
+      else if (f.id.includes("xss"))          remediations = REMEDIATION_MAP["injection-xss"] ?? null;
+      else if (f.id.startsWith("open-redirect")) remediations = REMEDIATION_MAP["open-redirect"] ?? null;
+    } else if (f.id.startsWith("cors-")) {
+      remediations = REMEDIATION_MAP[f.id] ?? REMEDIATION_MAP["cors-wildcard"] ?? null;
+    } else if (f.id.startsWith("cookie-")) {
+      remediations = REMEDIATION_MAP[f.id] ?? REMEDIATION_MAP["cookie-no-httponly"] ?? null;
     }
 
     return remediations ? { ...f, remediations } : f;
@@ -2431,6 +2667,328 @@ async function checkStoredXss(forms: FormInfo[], baseOrigin: string): Promise<Sc
   return findings;
 }
 
+// ── CORS Misconfiguration ─────────────────────────────────────────────────────
+
+async function checkCors(targetUrl: string): Promise<ScanFinding[]> {
+  const findings: ScanFinding[] = [];
+  const parsed = new URL(targetUrl);
+  const isHttps = parsed.protocol === "https:";
+  const lib = isHttps ? https : http;
+
+  const corsResult = await new Promise<{ acao?: string; acac?: string }>((resolve) => {
+    const options: https.RequestOptions = {
+      method: "GET",
+      host: parsed.hostname,
+      port: parsed.port || (isHttps ? 443 : 80),
+      path: parsed.pathname + parsed.search,
+      headers: {
+        "User-Agent": "Mozilla/5.0 (compatible; SecurityScanner/1.0)",
+        Accept: "*/*",
+        Origin: "https://evil-cors-attacker.com",
+      },
+      rejectUnauthorized: false,
+    };
+    const req = lib.request(options, (res) => {
+      res.resume();
+      resolve({
+        acao: res.headers["access-control-allow-origin"] as string | undefined,
+        acac: res.headers["access-control-allow-credentials"] as string | undefined,
+      });
+    });
+    req.setTimeout(8000, () => { req.destroy(); resolve({}); });
+    req.on("error", () => resolve({}));
+    req.end();
+  });
+
+  const { acao, acac } = corsResult;
+  if (!acao) return findings;
+
+  const credentialsEnabled = acac?.toLowerCase() === "true";
+
+  if (acao === "*" && credentialsEnabled) {
+    findings.push({
+      id: "cors-credentials-wildcard",
+      category: "headers",
+      title: "Critical CORS: Wildcard Origin with Credentials Enabled",
+      severity: "critical",
+      status: "fail",
+      description:
+        "The server sets Access-Control-Allow-Origin: * together with Access-Control-Allow-Credentials: true. " +
+        "Modern browsers reject this combination, but the configuration signals a severely misconfigured CORS policy. " +
+        "An attacker can craft cross-origin requests that exfiltrate authenticated responses using non-browser HTTP clients.",
+      detail: `Access-Control-Allow-Origin: ${acao}\nAccess-Control-Allow-Credentials: ${acac}\nTest Origin: https://evil-cors-attacker.com`,
+      recommendation:
+        "Replace the wildcard with an explicit allowlist of trusted origins. Never combine * with credentials: true.",
+    });
+  } else if (acao === "https://evil-cors-attacker.com") {
+    findings.push({
+      id: "cors-reflect-origin",
+      category: "headers",
+      title: "CORS: Server Reflects Arbitrary Attacker-Controlled Origin",
+      severity: "high",
+      status: "fail",
+      description:
+        "The server reflects the attacker-supplied Origin value verbatim in Access-Control-Allow-Origin. " +
+        "Any malicious website can make cross-origin requests and read the response — enabling CSRF, session exfiltration, " +
+        "and account takeover when paired with credentials.",
+      detail:
+        `Access-Control-Allow-Origin: ${acao}\n` +
+        `Access-Control-Allow-Credentials: ${acac ?? "not set"}\n` +
+        `Test Origin sent: https://evil-cors-attacker.com\n` +
+        `Origin was reflected verbatim — server does not validate the Origin`,
+      recommendation:
+        "Maintain an explicit allowlist of trusted origins. Never set Access-Control-Allow-Origin to the incoming Origin without strict validation.",
+    });
+  } else if (acao === "*") {
+    findings.push({
+      id: "cors-wildcard",
+      category: "headers",
+      title: "CORS: Wildcard Origin Allowed (Access-Control-Allow-Origin: *)",
+      severity: "medium",
+      status: "fail",
+      description:
+        "The server allows any origin to make cross-origin requests. While acceptable for fully public assets, " +
+        "this allows any website to read responses from your domain — potentially leaking sensitive API data or user information.",
+      detail: `Access-Control-Allow-Origin: *\nTest Origin: https://evil-cors-attacker.com`,
+      recommendation:
+        "If cross-origin access is needed, restrict to an explicit allowlist of trusted origins.",
+    });
+  }
+
+  return findings;
+}
+
+// ── Cookie Security Flags ─────────────────────────────────────────────────────
+
+function checkCookieSecurity(headers: Record<string, string | string[] | undefined>): ScanFinding[] {
+  const findings: ScanFinding[] = [];
+  const rawCookies = headers["set-cookie"];
+  if (!rawCookies) return findings;
+
+  const cookies = Array.isArray(rawCookies) ? rawCookies : [rawCookies];
+  const seen = new Set<string>();
+
+  for (const cookieStr of cookies) {
+    if (!cookieStr) continue;
+    const nameMatch = cookieStr.match(/^([^=;,\s]+)/);
+    const cookieName = nameMatch?.[1]?.trim() ?? "unknown";
+    const lower = cookieStr.toLowerCase();
+    const isSensitive = /sess|token|auth|login|user_?id|sid|csrf|xsrf/i.test(cookieName);
+
+    if (!lower.includes("httponly") && !seen.has("cookie-no-httponly")) {
+      seen.add("cookie-no-httponly");
+      findings.push({
+        id: "cookie-no-httponly",
+        category: "headers",
+        title: `Cookie Missing HttpOnly Flag: ${cookieName}`,
+        severity: isSensitive ? "high" : "medium",
+        status: "fail",
+        description:
+          `The cookie "${cookieName}" is set without the HttpOnly flag, making it readable via document.cookie in JavaScript. ` +
+          `An attacker exploiting an XSS vulnerability can steal this cookie and hijack the user's session.`,
+        detail: `Set-Cookie: ${cookieStr.slice(0, 200)}\nMissing flag: HttpOnly`,
+        recommendation:
+          "Add the HttpOnly attribute to all session and authentication cookies. This is a single config change in virtually every framework.",
+      });
+    }
+
+    if (!lower.includes("secure") && !seen.has("cookie-no-secure")) {
+      seen.add("cookie-no-secure");
+      findings.push({
+        id: "cookie-no-secure",
+        category: "headers",
+        title: `Cookie Missing Secure Flag: ${cookieName}`,
+        severity: isSensitive ? "high" : "low",
+        status: "fail",
+        description:
+          `The cookie "${cookieName}" is set without the Secure flag. Without this, the browser may send ` +
+          `the cookie over unencrypted HTTP, exposing it to network interception (man-in-the-middle attacks).`,
+        detail: `Set-Cookie: ${cookieStr.slice(0, 200)}\nMissing flag: Secure`,
+        recommendation: "Add Secure to all cookies. This ensures they are only transmitted over HTTPS.",
+      });
+    }
+
+    if (!lower.includes("samesite") && !seen.has("cookie-no-samesite")) {
+      seen.add("cookie-no-samesite");
+      findings.push({
+        id: "cookie-no-samesite",
+        category: "headers",
+        title: `Cookie Missing SameSite Attribute: ${cookieName}`,
+        severity: "medium",
+        status: "fail",
+        description:
+          `The cookie "${cookieName}" has no SameSite attribute. Without SameSite, the cookie is sent with all ` +
+          `cross-site requests, enabling Cross-Site Request Forgery (CSRF) attacks that can perform unauthorized actions on behalf of a logged-in user.`,
+        detail: `Set-Cookie: ${cookieStr.slice(0, 200)}\nMissing attribute: SameSite`,
+        recommendation:
+          "Set SameSite=Lax for most cookies (good balance of security and compatibility). Use SameSite=Strict for maximum CSRF protection.",
+      });
+    }
+
+    const sameSiteNoneInsecure =
+      lower.includes("samesite=none") && !lower.includes("secure");
+    if (sameSiteNoneInsecure && !seen.has("cookie-samesite-none-insecure")) {
+      seen.add("cookie-samesite-none-insecure");
+      findings.push({
+        id: "cookie-samesite-none-insecure",
+        category: "headers",
+        title: `Cookie SameSite=None Without Secure: ${cookieName}`,
+        severity: "high",
+        status: "fail",
+        description:
+          `The cookie "${cookieName}" uses SameSite=None but lacks the Secure flag. ` +
+          `The SameSite=None+Secure combination is required by modern browsers. Without Secure, the cookie is rejected in some browsers ` +
+          `and may be transmitted over HTTP in others.`,
+        detail: `Set-Cookie: ${cookieStr.slice(0, 200)}\nSameSite=None requires Secure flag`,
+        recommendation:
+          "Always pair SameSite=None with the Secure flag. Reconsider whether SameSite=None is actually needed for your use case.",
+      });
+    }
+  }
+
+  return findings;
+}
+
+// ── Open Redirect Detection ───────────────────────────────────────────────────
+
+const REDIRECT_PARAMS = [
+  "url", "redirect", "redirect_url", "redirect_uri",
+  "return", "return_url", "returnUrl", "returnTo",
+  "next", "goto", "target", "destination", "forward",
+  "link", "callback", "continue",
+];
+
+async function checkOpenRedirect(targetUrl: string): Promise<ScanFinding[]> {
+  const findings: ScanFinding[] = [];
+  const parsed = new URL(targetUrl);
+  const isHttps = parsed.protocol === "https:";
+  const lib = isHttps ? https : http;
+  const probe = "https://evil-open-redirect-probe.example.com/stolen";
+
+  for (const param of REDIRECT_PARAMS) {
+    const testUrl = new URL(targetUrl);
+    testUrl.searchParams.set(param, probe);
+    const testParsed = testUrl;
+
+    const location = await new Promise<string | null>((resolve) => {
+      const options: https.RequestOptions = {
+        method: "GET",
+        host: testParsed.hostname,
+        port: testParsed.port || (isHttps ? 443 : 80),
+        path: testParsed.pathname + testParsed.search,
+        headers: { "User-Agent": "Mozilla/5.0 (compatible; SecurityScanner/1.0)" },
+        rejectUnauthorized: false,
+      };
+      const req = lib.request(options, (res) => {
+        res.resume();
+        const loc = res.headers["location"] as string | undefined;
+        const isRedirect = [301, 302, 303, 307, 308].includes(res.statusCode ?? 0);
+        resolve(isRedirect && loc ? loc : null);
+      });
+      req.setTimeout(6000, () => { req.destroy(); resolve(null); });
+      req.on("error", () => resolve(null));
+      req.end();
+    });
+
+    if (location && location.includes("evil-open-redirect-probe")) {
+      findings.push({
+        id: `open-redirect-${param}`,
+        category: "injection",
+        title: `Open Redirect via Parameter: ?${param}=`,
+        severity: "medium",
+        status: "fail",
+        description:
+          `The server redirects users to an attacker-controlled URL when the "${param}" parameter contains an external URL. ` +
+          `Open redirects enable phishing attacks — attackers send links that appear to originate from your trusted domain ` +
+          `but deliver victims to a malicious site, bypassing browser security warnings.`,
+        detail:
+          `Vulnerable parameter: ${param}\n` +
+          `Test URL: ${testUrl.toString().slice(0, 300)}\n` +
+          `Redirected to: ${location}`,
+        recommendation:
+          "1. Validate redirect targets against an allowlist of trusted origins.\n" +
+          "2. For internal redirects, accept only relative paths (strip the scheme/host entirely).\n" +
+          "3. If external redirects are necessary, show a confirmation interstitial page first.",
+        execution_poc:
+          `# ── Open Redirect Verification ────────────────────────────\n\n` +
+          `# Confirm redirect with curl\n` +
+          `curl -sk -I "${testUrl.toString()}" | grep -i location\n` +
+          `# Expected: Location: https://evil-open-redirect-probe.example.com/stolen\n\n` +
+          `# Craft phishing link — appears to come from legitimate domain:\n` +
+          `# ${testUrl.toString()}\n` +
+          `# Victim sees ${parsed.hostname} in the URL bar and clicks — lands on attacker site`,
+      });
+      break;
+    }
+  }
+
+  return findings;
+}
+
+// ── Subdomain Enumeration ─────────────────────────────────────────────────────
+
+const COMMON_SUBDOMAINS = [
+  "www", "api", "app", "mail", "smtp", "webmail", "m", "mobile",
+  "admin", "panel", "dashboard", "portal", "dev", "development",
+  "staging", "stage", "test", "demo", "beta", "preview", "uat", "qa",
+  "blog", "shop", "store", "cdn", "static", "assets", "media", "img",
+  "ftp", "ssh", "git", "gitlab", "jenkins", "ci", "jira", "confluence",
+  "support", "help", "docs", "kb", "status", "monitor",
+  "auth", "login", "sso", "id", "accounts", "account", "secure",
+  "vpn", "remote", "intranet", "internal",
+];
+
+async function checkSubdomains(hostname: string): Promise<ScanFinding[]> {
+  const baseDomain = hostname.startsWith("www.") ? hostname.slice(4) : hostname;
+  if (baseDomain === "localhost" || /^\d+\.\d+\.\d+\.\d+$/.test(baseDomain)) {
+    return [];
+  }
+
+  const discovered: string[] = [];
+  const withTimeout = (fqdn: string): Promise<void> =>
+    Promise.race([
+      dns.resolve4(fqdn).then((addrs) => {
+        if (addrs?.length) discovered.push(`${fqdn} → ${addrs[0]}`);
+      }).catch(() => {}),
+      new Promise<void>((resolve) => setTimeout(resolve, 2000)),
+    ]);
+
+  await Promise.all(
+    COMMON_SUBDOMAINS.map((sub) => {
+      const fqdn = `${sub}.${baseDomain}`;
+      if (fqdn === hostname) return Promise.resolve();
+      return withTimeout(fqdn);
+    }),
+  );
+
+  if (discovered.length === 0) return [];
+
+  return [{
+    id: "subdomain-enum",
+    category: "dns",
+    title: `Subdomain Enumeration: ${discovered.length} Active Subdomain${discovered.length > 1 ? "s" : ""} Discovered`,
+    severity: "info",
+    status: "info",
+    description:
+      `${discovered.length} active subdomain${discovered.length > 1 ? "s were" : " was"} discovered by probing common subdomain names. ` +
+      `Each active subdomain expands the attack surface. Forgotten dev/staging subdomains frequently run outdated software with unpatched vulnerabilities.`,
+    detail: `Discovered subdomains:\n${discovered.join("\n")}`,
+    recommendation:
+      "Audit all discovered subdomains. Decommission or restrict access to unused subdomains. " +
+      "Ensure dev/staging environments are not publicly reachable. Review each subdomain for outdated software.",
+    execution_poc:
+      `# ── Subdomain Enumeration ──────────────────────────────────\n\n` +
+      `# Resolved subdomains (via DNS A record):\n` +
+      `${discovered.slice(0, 6).map((d) => `# ${d}`).join("\n")}\n\n` +
+      `# Enumerate further with subfinder:\n` +
+      `subfinder -d ${baseDomain} -o subdomains.txt\n\n` +
+      `# Or amass:\n` +
+      `amass enum -passive -d ${baseDomain}\n\n` +
+      `# Scan each for vulnerabilities:\n` +
+      `${discovered.slice(0, 3).map((d) => `curl -sk https://${d.split(" ")[0]}/ -I`).join("\n")}`,
+  }];
+}
+
 export async function runScan(
   targetUrl: string,
   crawlEnabled = false,
@@ -2479,7 +3037,7 @@ export async function runScan(
 
   // ── Core single-URL checks (always run on target) ────────────────────────
   emit({ type: "phase", message: "Running core security checks (DNS, SSL, headers, methods, content)...", pct: 20 });
-  const [dnsFindings, sslFindings, contentFindings, httpMethodFindings, sensitiveFileFindings, sqliFindings, xssFindings] = await Promise.all([
+  const [dnsFindings, sslFindings, contentFindings, httpMethodFindings, sensitiveFileFindings, sqliFindings, xssFindings, corsFindings, openRedirectFindings, subdomainFindings] = await Promise.all([
     checkDns(hostname),
     checkSsl(targetUrl, mainFetch),
     checkContentDiscovery(targetUrl),
@@ -2487,10 +3045,14 @@ export async function runScan(
     checkSensitiveFiles(targetUrl),
     checkSqlInjection(targetUrl),
     checkXss(targetUrl),
+    checkCors(targetUrl),
+    checkOpenRedirect(targetUrl),
+    checkSubdomains(hostname),
   ]);
 
-  const headerFindings = checkSecurityHeaders(mainFetch.headers);
-  const serverFindings = checkServerInfo(mainFetch.headers);
+  const headerFindings  = checkSecurityHeaders(mainFetch.headers);
+  const serverFindings  = checkServerInfo(mainFetch.headers);
+  const cookieFindings  = checkCookieSecurity(mainFetch.headers);
   emit({ type: "phase", message: "Core checks complete", pct: 40 });
 
   // ── Crawl-mode: p-limit injection queue (SQLi + XSS × 4 checks per URL) ──
@@ -2585,14 +3147,18 @@ export async function runScan(
 
   const allFindings = [
     ...dnsFindings,
+    ...subdomainFindings,
     ...sslFindings,
     ...headerFindings,
+    ...cookieFindings,
+    ...corsFindings,
     ...serverFindings,
     ...contentFindings,
     ...httpMethodFindings,
     ...sensitiveFileFindings,
     ...sqliFindings,
     ...xssFindings,
+    ...openRedirectFindings,
     ...extraSqliFindings,
     ...extraSqliTimeFindings,
     ...extraXssFindings,
