@@ -6,7 +6,7 @@ import {
   ShieldAlert, ShieldCheck, AlertTriangle,
   Info, ArrowLeft, Server, Lock, Globe,
   FileCode, CheckCircle2, XCircle, Activity,
-  ChevronDown, ChevronUp, Wifi, Search
+  ChevronDown, ChevronUp, Search, FolderLock, Syringe
 } from "lucide-react";
 import { Link } from "wouter";
 
@@ -399,6 +399,20 @@ function getSeverityConfig(severity: string) {
         remediationText: "text-foreground",
         remediationBorder: "border-slate-500/20",
       };
+  }
+}
+
+function getCategoryIcon(category: string) {
+  switch (category) {
+    case "dns":               return <Globe className="w-3.5 h-3.5" />;
+    case "ssl":               return <Lock className="w-3.5 h-3.5" />;
+    case "headers":           return <FileCode className="w-3.5 h-3.5" />;
+    case "server_info":       return <Server className="w-3.5 h-3.5" />;
+    case "content_discovery": return <Search className="w-3.5 h-3.5" />;
+    case "http_methods":      return <Activity className="w-3.5 h-3.5" />;
+    case "sensitive_files":   return <FolderLock className="w-3.5 h-3.5" />;
+    case "injection":         return <Syringe className="w-3.5 h-3.5" />;
+    default:                  return <ShieldAlert className="w-3.5 h-3.5" />;
   }
 }
 

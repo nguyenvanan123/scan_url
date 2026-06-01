@@ -28,7 +28,7 @@ export const ListScansResponseItem = zod.object({
   "result": zod.object({
   "findings": zod.array(zod.object({
   "id": zod.string(),
-  "category": zod.enum(['dns', 'ssl', 'headers', 'server_info', 'content_discovery', 'http_methods']),
+  "category": zod.enum(['dns', 'ssl', 'headers', 'server_info', 'content_discovery', 'http_methods', 'sensitive_files', 'injection']),
   "title": zod.string(),
   "severity": zod.enum(['info', 'low', 'medium', 'high', 'critical']),
   "status": zod.enum(['pass', 'fail', 'warning', 'info']),
@@ -82,7 +82,7 @@ export const GetScanResponse = zod.object({
   "result": zod.object({
   "findings": zod.array(zod.object({
   "id": zod.string(),
-  "category": zod.enum(['dns', 'ssl', 'headers', 'server_info', 'content_discovery', 'http_methods']),
+  "category": zod.enum(['dns', 'ssl', 'headers', 'server_info', 'content_discovery', 'http_methods', 'sensitive_files', 'injection']),
   "title": zod.string(),
   "severity": zod.enum(['info', 'low', 'medium', 'high', 'critical']),
   "status": zod.enum(['pass', 'fail', 'warning', 'info']),
@@ -139,7 +139,7 @@ export const GetScanStatsResponse = zod.object({
   "result": zod.object({
   "findings": zod.array(zod.object({
   "id": zod.string(),
-  "category": zod.enum(['dns', 'ssl', 'headers', 'server_info', 'content_discovery', 'http_methods']),
+  "category": zod.enum(['dns', 'ssl', 'headers', 'server_info', 'content_discovery', 'http_methods', 'sensitive_files', 'injection']),
   "title": zod.string(),
   "severity": zod.enum(['info', 'low', 'medium', 'high', 'critical']),
   "status": zod.enum(['pass', 'fail', 'warning', 'info']),

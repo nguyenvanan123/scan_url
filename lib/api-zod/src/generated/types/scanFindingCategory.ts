@@ -16,4 +16,6 @@ export const ScanFindingCategory = {
   server_info: 'server_info',
   content_discovery: 'content_discovery',
   http_methods: 'http_methods',
+  sensitive_files: 'sensitive_files',
+  injection: 'injection',
 } as const;

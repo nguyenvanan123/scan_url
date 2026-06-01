@@ -5,7 +5,7 @@ import { URL } from "url";
 
 export interface ScanFinding {
   id: string;
-  category: "dns" | "ssl" | "headers" | "server_info" | "content_discovery" | "http_methods";
+  category: "dns" | "ssl" | "headers" | "server_info" | "content_discovery" | "http_methods" | "sensitive_files" | "injection";
   title: string;
   severity: "info" | "low" | "medium" | "high" | "critical";
   status: "pass" | "fail" | "warning" | "info";
@@ -632,6 +632,277 @@ async function checkHttpMethods(baseUrl: string): Promise<ScanFinding[]> {
   return findings;
 }
 
+// ── Sensitive Files ──────────────────────────────────────────────────────────
+
+const SENSITIVE_PATHS: Array<{ path: string; label: string; severity: ScanFinding["severity"]; why: string }> = [
+  { path: "/.git/HEAD",         label: ".git/HEAD",       severity: "critical", why: "Git repository metadata is publicly accessible, potentially exposing source code history, credentials, and internal logic." },
+  { path: "/.git/config",       label: ".git/config",     severity: "critical", why: "Git config can reveal remote URLs, author details, and repository structure." },
+  { path: "/.env",              label: ".env",            severity: "critical", why: "Environment file may contain database credentials, API keys, and other secrets in plain text." },
+  { path: "/.env.local",        label: ".env.local",      severity: "critical", why: "Local environment override file may contain secrets not intended for production." },
+  { path: "/.env.production",   label: ".env.production", severity: "critical", why: "Production environment file may expose database credentials and API keys." },
+  { path: "/wp-config.php",     label: "wp-config.php",   severity: "critical", why: "WordPress configuration file contains database host, name, username, and password." },
+  { path: "/.htpasswd",         label: ".htpasswd",       severity: "high",     why: "Exposes hashed credentials for HTTP Basic Authentication — attackers can attempt offline dictionary attacks." },
+  { path: "/.htaccess",         label: ".htaccess",       severity: "medium",   why: "Reveals server configuration rules such as rewrites, redirects, access restrictions, and custom error pages." },
+  { path: "/web.config",        label: "web.config",      severity: "high",     why: "IIS configuration file can contain connection strings, authentication settings, and custom error details." },
+  { path: "/phpinfo.php",       label: "phpinfo.php",     severity: "high",     why: "PHP info page exposes server configuration, loaded modules, environment variables, and PHP version." },
+  { path: "/server-status",     label: "server-status",   severity: "medium",   why: "Apache server-status page discloses active requests, clients, and server uptime." },
+  { path: "/server-info",       label: "server-info",     severity: "medium",   why: "Apache server-info page reveals installed modules and configuration directives." },
+  { path: "/config.php",        label: "config.php",      severity: "high",     why: "Application config file may expose database credentials and internal settings." },
+  { path: "/config.yml",        label: "config.yml",      severity: "high",     why: "YAML config file may contain secrets, database credentials, or service API keys." },
+  { path: "/config.json",       label: "config.json",     severity: "medium",   why: "JSON configuration file may reveal application settings and internal structure." },
+  { path: "/backup.sql",        label: "backup.sql",      severity: "critical", why: "A database dump file is directly accessible — contains all table structure and data." },
+  { path: "/dump.sql",          label: "dump.sql",        severity: "critical", why: "A database dump file is directly accessible — contains all table structure and data." },
+  { path: "/database.sql",      label: "database.sql",    severity: "critical", why: "A database export file is directly accessible." },
+  { path: "/.DS_Store",         label: ".DS_Store",       severity: "low",      why: "macOS metadata file reveals directory structure and file names on the server." },
+  { path: "/crossdomain.xml",   label: "crossdomain.xml", severity: "low",      why: "Flash cross-domain policy file — if misconfigured (allow-access-from domain='*'), allows any Flash app to read responses." },
+  { path: "/elmah.axd",         label: "elmah.axd",       severity: "high",     why: "ASP.NET error log viewer is publicly accessible, exposing stack traces, server paths, and potential credentials." },
+  { path: "/trace.axd",         label: "trace.axd",       severity: "medium",   why: "ASP.NET trace viewer exposes request/response details and internal data flows." },
+];
+
+async function checkSensitiveFiles(baseUrl: string): Promise<ScanFinding[]> {
+  const findings: ScanFinding[] = [];
+  const parsed = new URL(baseUrl);
+  const base = `${parsed.protocol}//${parsed.host}`;
+
+  const results = await Promise.allSettled(
+    SENSITIVE_PATHS.map(async ({ path, label, severity, why }) => {
+      try {
+        const res = await fetchUrl(base + path, "GET", 5000);
+        if (res.statusCode === 200 || res.statusCode === 206) {
+          const snippet = res.body.slice(0, 300).trim();
+          return { label, severity, why, path, snippet, found: true };
+        }
+      } catch {}
+      return { found: false };
+    })
+  );
+
+  let foundCount = 0;
+  for (const r of results) {
+    if (r.status === "fulfilled" && r.value.found) {
+      const { label, severity, why, path, snippet } = r.value as any;
+      foundCount++;
+      findings.push({
+        id: `sensitive-${label.replace(/[^a-z0-9]/gi, "-")}`,
+        category: "sensitive_files",
+        title: `Sensitive File Exposed: ${label}`,
+        severity,
+        status: "fail",
+        description: why,
+        detail: snippet ? `Path: ${path}\nPreview: ${snippet}` : `Path: ${path}`,
+        recommendation:
+          severity === "critical"
+            ? `Immediately block access to ${path} via your web server config. Remove any sensitive files from the web root. For .git/, add 'location /.git { deny all; }' (nginx) or 'RedirectMatch 404 /\\.git' (Apache). Rotate all credentials that may have been exposed.`
+            : `Block public access to ${path} in your web server or firewall rules. Verify this file is not required to be publicly accessible.`,
+      });
+    }
+  }
+
+  if (foundCount === 0) {
+    findings.push({
+      id: "sensitive-files-none",
+      category: "sensitive_files",
+      title: "No Sensitive Files Exposed",
+      severity: "info",
+      status: "pass",
+      description: `Checked ${SENSITIVE_PATHS.length} common sensitive paths — none returned HTTP 200.`,
+    });
+  }
+
+  return findings;
+}
+
+// ── SQL Injection ─────────────────────────────────────────────────────────────
+
+const SQL_PAYLOADS = ["'", '"', "' OR '1'='1", `" OR "1"="1`, "1 AND 1=2", "' OR 1=1--", "';--"];
+
+const SQL_ERROR_PATTERNS = [
+  /SQL syntax.*MySQL/i,
+  /MySQL.*SQL syntax/i,
+  /Warning.*mysql_/i,
+  /valid MySQL result/i,
+  /MySqlClient\./i,
+  /PostgreSQL.*ERROR/i,
+  /ERROR.*PostgreSQL/i,
+  /org\.postgresql\.util\.PSQLException/i,
+  /ORA-\d{4,}/i,
+  /Oracle error/i,
+  /SQLite.*error/i,
+  /sqlite3\.OperationalError/i,
+  /\[Microsoft\]\[ODBC SQL Server Driver\]/i,
+  /\[SQL Server\]/i,
+  /Unclosed quotation mark/i,
+  /quoted string not properly terminated/i,
+  /com\.microsoft\.sqlserver\.jdbc/i,
+  /Syntax error.*in query/i,
+  /SQLSTATE\[\w+\]/i,
+  /PDOException/i,
+  /Query failed:/i,
+];
+
+async function checkSqlInjection(targetUrl: string): Promise<ScanFinding[]> {
+  const findings: ScanFinding[] = [];
+  const parsed = new URL(targetUrl);
+  const params = Array.from(parsed.searchParams.keys());
+
+  if (params.length === 0) {
+    findings.push({
+      id: "sqli-no-params",
+      category: "injection",
+      title: "SQL Injection — No Query Parameters Found",
+      severity: "info",
+      status: "info",
+      description: "The target URL has no query parameters to test for SQL injection. To test form inputs or API endpoints, provide a URL with query parameters (e.g. https://example.com/search?q=test).",
+    });
+    return findings;
+  }
+
+  const vulnerableParams: string[] = [];
+  const evidenceMap: Record<string, string> = {};
+
+  for (const param of params) {
+    for (const payload of SQL_PAYLOADS) {
+      try {
+        const testUrl = new URL(targetUrl);
+        testUrl.searchParams.set(param, payload);
+        const res = await fetchUrl(testUrl.toString(), "GET", 6000);
+        const body = res.body;
+
+        for (const pattern of SQL_ERROR_PATTERNS) {
+          const match = pattern.exec(body);
+          if (match) {
+            if (!vulnerableParams.includes(param)) {
+              vulnerableParams.push(param);
+              const start = Math.max(0, match.index - 40);
+              evidenceMap[param] = `Payload: ${payload}\nError snippet: ...${body.slice(start, start + 200)}...`;
+            }
+            break;
+          }
+        }
+      } catch {}
+      if (vulnerableParams.includes(param)) break;
+    }
+  }
+
+  if (vulnerableParams.length > 0) {
+    findings.push({
+      id: "sqli-reflected-error",
+      category: "injection",
+      title: "SQL Injection — Error-Based Reflected SQLi Detected",
+      severity: "critical",
+      status: "fail",
+      description: `The server returned database error messages in response to SQL injection payloads in parameter(s): ${vulnerableParams.join(", ")}. This confirms the input is being passed to a SQL query without proper sanitisation. An attacker can extract, modify, or delete database content, and potentially achieve remote code execution.`,
+      detail: Object.entries(evidenceMap).map(([p, e]) => `Parameter: ${p}\n${e}`).join("\n\n"),
+      recommendation: "1. Use parameterised queries (prepared statements) — never concatenate user input into SQL strings.\n2. Use an ORM with built-in escaping.\n3. Enforce least-privilege database accounts (read-only where possible).\n4. Disable detailed database error messages in production — log errors server-side only.\n5. Apply WAF rules to block common SQLi patterns.",
+    });
+  } else {
+    findings.push({
+      id: "sqli-not-detected",
+      category: "injection",
+      title: "SQL Injection — No Error-Based SQLi Detected",
+      severity: "info",
+      status: "pass",
+      description: `Tested ${params.length} parameter(s) with ${SQL_PAYLOADS.length} payloads each. No SQL error patterns were detected in responses. Note: this tests only error-based SQLi — blind/time-based SQLi requires deeper testing.`,
+      detail: `Parameters tested: ${params.join(", ")}`,
+    });
+  }
+
+  return findings;
+}
+
+// ── XSS (Reflected) ───────────────────────────────────────────────────────────
+
+const XSS_PAYLOADS = [
+  "<script>alert(1)</script>",
+  `"><script>alert(1)</script>`,
+  `'><script>alert(1)</script>`,
+  `"><img src=x onerror=alert(1)>`,
+  `<svg onload=alert(1)>`,
+  `javascript:alert(1)`,
+];
+
+// Patterns that indicate the payload was reflected unescaped in HTML
+const XSS_REFLECT_PATTERNS = [
+  /<script>alert\(1\)<\/script>/i,
+  /"><script>alert\(1\)<\/script>/i,
+  /'><script>alert\(1\)<\/script>/i,
+  /"><img src=x onerror=alert\(1\)>/i,
+  /<svg onload=alert\(1\)>/i,
+  /javascript:alert\(1\)/i,
+];
+
+async function checkXss(targetUrl: string): Promise<ScanFinding[]> {
+  const findings: ScanFinding[] = [];
+  const parsed = new URL(targetUrl);
+  const params = Array.from(parsed.searchParams.keys());
+
+  if (params.length === 0) {
+    findings.push({
+      id: "xss-no-params",
+      category: "injection",
+      title: "Reflected XSS — No Query Parameters Found",
+      severity: "info",
+      status: "info",
+      description: "The target URL has no query parameters to test for reflected XSS. Provide a URL with query parameters (e.g. https://example.com/search?q=test) to enable this check.",
+    });
+    return findings;
+  }
+
+  const vulnerableParams: string[] = [];
+  const evidenceMap: Record<string, string> = {};
+
+  for (const param of params) {
+    for (let i = 0; i < XSS_PAYLOADS.length; i++) {
+      const payload = XSS_PAYLOADS[i];
+      const pattern = XSS_REFLECT_PATTERNS[i];
+      try {
+        const testUrl = new URL(targetUrl);
+        testUrl.searchParams.set(param, payload);
+        const res = await fetchUrl(testUrl.toString(), "GET", 6000);
+
+        const contentType = headerStr(res.headers["content-type"]) ?? "";
+        if (!contentType.includes("html")) continue;
+
+        if (pattern.test(res.body)) {
+          if (!vulnerableParams.includes(param)) {
+            vulnerableParams.push(param);
+            const match = pattern.exec(res.body)!;
+            const start = Math.max(0, match.index - 60);
+            evidenceMap[param] = `Payload: ${payload}\nReflected in response:\n...${res.body.slice(start, start + 250)}...`;
+          }
+          break;
+        }
+      } catch {}
+      if (vulnerableParams.includes(param)) break;
+    }
+  }
+
+  if (vulnerableParams.length > 0) {
+    findings.push({
+      id: "xss-reflected",
+      category: "injection",
+      title: "Reflected XSS — Payload Reflected Unescaped in HTML",
+      severity: "high",
+      status: "fail",
+      description: `XSS payloads were reflected verbatim in the HTML response for parameter(s): ${vulnerableParams.join(", ")}. An attacker can craft a malicious URL that, when visited by a victim, executes arbitrary JavaScript in the victim's browser — enabling cookie theft, session hijacking, and phishing.`,
+      detail: Object.entries(evidenceMap).map(([p, e]) => `Parameter: ${p}\n${e}`).join("\n\n"),
+      recommendation: "1. HTML-encode all user-supplied values before rendering in HTML (e.g. replace < with &lt;, > with &gt;, \" with &quot;).\n2. Use a context-aware template engine that auto-escapes output (React JSX, Jinja2 autoescape, etc.).\n3. Set a strict Content-Security-Policy header to block inline script execution.\n4. Set X-XSS-Protection: 1; mode=block (legacy browsers).\n5. Validate and whitelist input server-side — reject or sanitise unexpected characters.",
+    });
+  } else {
+    findings.push({
+      id: "xss-not-reflected",
+      category: "injection",
+      title: "Reflected XSS — No Unescaped Reflection Detected",
+      severity: "info",
+      status: "pass",
+      description: `Tested ${params.length} parameter(s) with ${XSS_PAYLOADS.length} XSS payloads each. No payload was reflected unescaped in the HTML response. Note: this covers reflected XSS only — stored and DOM-based XSS require separate testing.`,
+      detail: `Parameters tested: ${params.join(", ")}`,
+    });
+  }
+
+  return findings;
+}
+
 export async function runScan(targetUrl: string): Promise<ScanResult> {
   const parsed = new URL(targetUrl);
   const hostname = parsed.hostname;
@@ -649,11 +920,14 @@ export async function runScan(targetUrl: string): Promise<ScanResult> {
     ipAddress = addrs[0] ?? null;
   } catch {}
 
-  const [dnsFindings, sslFindings, contentFindings, httpMethodFindings] = await Promise.all([
+  const [dnsFindings, sslFindings, contentFindings, httpMethodFindings, sensitiveFileFindings, sqliFindings, xssFindings] = await Promise.all([
     checkDns(hostname),
     checkSsl(targetUrl, mainFetch),
     checkContentDiscovery(targetUrl),
     checkHttpMethods(targetUrl),
+    checkSensitiveFiles(targetUrl),
+    checkSqlInjection(targetUrl),
+    checkXss(targetUrl),
   ]);
 
   const headerFindings = checkSecurityHeaders(mainFetch.headers);
@@ -666,6 +940,9 @@ export async function runScan(targetUrl: string): Promise<ScanResult> {
     ...serverFindings,
     ...contentFindings,
     ...httpMethodFindings,
+    ...sensitiveFileFindings,
+    ...sqliFindings,
+    ...xssFindings,
   ];
 
   const summary: ScanSummary = {
