@@ -1,0 +1,22 @@
+Please upgrade the project to implement a "Multi-Scenario Attack Simulator & Test Case Engine" inside the vulnerability detail cards. For each vulnerability type found, instead of a single exploit button, the app must generate multiple real-world attack scenarios (test cases) that the user can actively launch and witness.
+
+Here are the specific implementation requirements:
+
+1. Backend Test Case Data Structure:
+- Update the vulnerability schema/response to include an array of `attackScenarios`. Each scenario object must contain: `id`, `name`, `attackerObjective` (e.g., Credential Theft, Phishing, Defacement), `description`, and `exploitEndpoint`.
+- Pre-program the following multi-scenarios for these core vulnerabilities:
+  * Missing X-Frame-Options (Clickjacking):
+    - Scenario 1: "Fake Lottery Bait" (Objective: Trick user into clicking an invisible button to trigger actions on the scanned site).
+    - Scenario 2: "Fake Video Play Button" (Objective: Overlapping a play button over a critical form submit button).
+  * Missing Content-Security-Policy (XSS Potential):
+    - Scenario 1: "Session Cookie Exfiltration" (Objective: Simulate stealing authentication tokens via a mock scripts).
+    - Scenario 2: "Keylogger Injection" (Objective: Simulate capturing real-time keystrokes inside an isolated sandbox log).
+
+2. Frontend UI Upgrade (Dynamic Attack Menu):
+- Inside the vulnerability card, render a dedicated section: "🎭 Real-World Attack Scenarios (Select a Test Case to Execute)".
+- Present these scenarios as an interactive list or grid card layout. Each card displays the Objective (tagged in yellow/red), a brief description of how a hacker leverages it, and a prominent action button: "Launch This Scenario".
+
+3. Interactive Simulation execution:
+- When "Launch This Scenario" is clicked, dynamically build the specialized simulation link (e.g., `/exploit-playground/:vulnerabilityType/:scenarioId?target=...`).
+- Open this simulation link in a new browser tab.
+- The opened page must cleanly demonstrate that exact attack technique (e.g., loading the respective phishing template, configuring the specific overlay layout, or starting the specialized simulated data capture log) with the "Opacity Slider" control panel included so the user can audit the mechanism live.

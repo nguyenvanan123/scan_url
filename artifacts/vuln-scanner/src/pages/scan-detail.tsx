@@ -19,6 +19,7 @@ import { ScanFinding, ScanFindingCategory } from "@workspace/api-zod";
 import { PocTerminal } from "@/components/poc-terminal";
 import { RemediationTabs } from "@/components/remediation-tabs";
 import { getClientRemediations } from "@/lib/remediation-data";
+import { AttackScenariosPanel } from "@/components/attack-scenarios";
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"] as const;
 
@@ -289,6 +290,9 @@ function FindingCard({ finding, scanUrl, serverInfo }: FindingCardProps) {
               <PocTerminal finding={finding} scanUrl={scanUrl} />
             </div>
           )}
+
+          {/* Attack scenario simulator */}
+          <AttackScenariosPanel findingId={finding.id} scanUrl={scanUrl} />
         </div>
       )}
     </div>

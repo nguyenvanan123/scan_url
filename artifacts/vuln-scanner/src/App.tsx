@@ -1,11 +1,12 @@
 import { useEffect, useState, createContext, useContext } from "react";
-import { Switch, Route, Router as WouterRouter } from "wouter";
+import { Switch, Route, Router as WouterRouter, useRoute } from "wouter";
 import { QueryClient, QueryClientProvider } from "@tanstack/react-query";
 import { Toaster } from "@/components/ui/toaster";
 import { TooltipProvider } from "@/components/ui/tooltip";
 import NotFound from "@/pages/not-found";
 import Home from "@/pages/home";
 import ScanDetail from "@/pages/scan-detail";
+import ExploitPlayground from "@/pages/exploit-playground";
 import { ShieldAlert, Sun, Moon } from "lucide-react";
 import { Link } from "wouter";
 
@@ -54,6 +55,16 @@ function Layout({ children }: { children: React.ReactNode }) {
 }
 
 function Router() {
+  const [isPlayground] = useRoute("/exploit-playground/:type/:scenarioId");
+
+  if (isPlayground) {
+    return (
+      <Switch>
+        <Route path="/exploit-playground/:type/:scenarioId" component={ExploitPlayground} />
+      </Switch>
+    );
+  }
+
   return (
     <Layout>
       <Switch>
