@@ -28,6 +28,8 @@ A personal web security scanner that lets you audit your own websites for common
 - `lib/db/src/schema/scans.ts` — database schema (scans table)
 - `artifacts/api-server/src/lib/scanner.ts` — core scanning engine
 - `artifacts/api-server/src/routes/scans.ts` — scan API routes
+- `artifacts/api-server/src/routes/exploit.ts` — Exploit Playground backend (SSE streams, header audit, LFI probe, SQLi probe, XSS injection, session injection)
+- `artifacts/vuln-scanner/src/pages/exploit-playground.tsx` — Exploit Playground frontend
 - `artifacts/vuln-scanner/src/` — React frontend
 
 ## Architecture decisions
@@ -35,14 +37,26 @@ A personal web security scanner that lets you audit your own websites for common
 - The scan runs synchronously on the backend: the POST /scans endpoint inserts a record with `status: running`, responds with 201 immediately, then continues scanning in the background and updates the record. The frontend polls the scan detail endpoint until status = completed.
 - All scanner checks use Node.js built-ins (`dns/promises`, `https`, `http`) — no external scanning libraries required, keeping the dependency footprint small and the tool safe for personal use.
 - Results are stored as JSONB in PostgreSQL — flexible schema for findings without needing separate tables per check type.
-- Security headers, DNS records, SSL cert info, server info leakage, content discovery (robots.txt, sitemap, security.txt), and HTTP methods are all checked in parallel via `Promise.all`.
+- Security headers, DNS records, SSL cert info, server info leakage, content discovery (robots.txt, sitemap.xml, security.txt), and HTTP methods are all checked in parallel via `Promise.all`.
+- Exploit Playground uses SSE (`text/event-stream`) for live streaming of per-payload network logs — the frontend opens an `EventSource` and each HTTP probe result is pushed as a JSON event in real time.
+- All `/api/exploit/*` routes (except `/config`) are guarded by an optional `EXPLOIT_TOKEN` env var. If set, requests must pass `?token=` or `Authorization: Bearer`. Private/loopback IPs are blocked via `isPrivateHost()` to prevent SSRF.
+- Puppeteer is used in the Exploit Playground for XSS token injection and session capture — pages are launched with `evaluateOnNewDocument` fingerprint masking (UA, webdriver flag, plugins, canvas noise).
 
 ## Product
 
+### Scanner
 - Paste a URL and click Scan — the tool checks DNS records, SSL certificate validity, HTTP security headers (HSTS, CSP, X-Frame-Options, X-Content-Type-Options, Referrer-Policy, Permissions-Policy), server information leakage, content discovery (robots.txt, sitemap.xml, security.txt), and HTTP methods (TRACE).
 - Results are displayed grouped by category with severity badges (critical/high/medium/low/info) and pass/fail/warning status.
 - Each finding includes a description and actionable remediation recommendation.
 - Scan history is stored and accessible at any time.
+
+### Exploit Playground
+- **SQLi Probe** — SSE stream: fires error-based and time-based payloads + obfuscated mutations; each request logs `[HTTP status|ms] phase » payload ← finding` in real time.
+- **LFI / Path Traversal Probe** — SSE stream: tests 16 traversal sequences (Unix + Windows, plain + URL-encoded + double-encoded) against a query parameter; flags any response that leaks `/etc/passwd` or similar.
+- **Sensitive File Fetch** — directly fetches exposed files (`.env`, `wp-config.php`, etc.) and shows first 10 lines with sensitive values redacted.
+- **Clickjacking Simulator** — overlays an invisible iframe over a decoy UI; includes a **Live Header Audit** that fetches real response headers and reports X-Frame-Options, CSP `frame-ancestors`, HSTS, and CORS misconfiguration.
+- **XSS Token Injection** — launches a Puppeteer page with fingerprint masking to harvest cookies, localStorage tokens, and DOM secrets from a target URL.
+- **Session Injection** — replays a captured session cookie in a headless browser and streams a C2-style log of what the injected session can access.
 
 ## Chạy local (macOS / Windows / Linux)
 
