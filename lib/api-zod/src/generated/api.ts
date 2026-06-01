@@ -35,6 +35,18 @@ export const ListScansResponseItem = zod.object({
   "description": zod.string(),
   "detail": zod.string().nullish(),
   "recommendation": zod.string().nullish(),
+  "remediations": zod.union([zod.object({
+  "nginx": zod.string().optional(),
+  "apache": zod.string().optional(),
+  "nodejs": zod.string().optional(),
+  "iis": zod.string().optional(),
+  "caddy": zod.string().optional(),
+  "cloudflare": zod.string().optional(),
+  "php": zod.string().optional(),
+  "python": zod.string().optional(),
+  "java": zod.string().optional(),
+  "ruby": zod.string().optional()
+}).describe('Technology-specific remediation code snippets. Each key is a platform\/framework slug, value is a ready-to-use configuration or code snippet.'),zod.null()]).optional(),
   "execution_poc": zod.string().nullish().describe('Step-by-step proof-of-concept: how an attacker or tester would verify and exploit this finding, including commands (curl, Burp Suite, browser) and expected outcome.')
 })),
   "summary": zod.object({
@@ -100,6 +112,18 @@ export const GetScanResponse = zod.object({
   "description": zod.string(),
   "detail": zod.string().nullish(),
   "recommendation": zod.string().nullish(),
+  "remediations": zod.union([zod.object({
+  "nginx": zod.string().optional(),
+  "apache": zod.string().optional(),
+  "nodejs": zod.string().optional(),
+  "iis": zod.string().optional(),
+  "caddy": zod.string().optional(),
+  "cloudflare": zod.string().optional(),
+  "php": zod.string().optional(),
+  "python": zod.string().optional(),
+  "java": zod.string().optional(),
+  "ruby": zod.string().optional()
+}).describe('Technology-specific remediation code snippets. Each key is a platform\/framework slug, value is a ready-to-use configuration or code snippet.'),zod.null()]).optional(),
   "execution_poc": zod.string().nullish().describe('Step-by-step proof-of-concept: how an attacker or tester would verify and exploit this finding, including commands (curl, Burp Suite, browser) and expected outcome.')
 })),
   "summary": zod.object({
@@ -167,6 +191,18 @@ export const GetScanStatsResponse = zod.object({
   "description": zod.string(),
   "detail": zod.string().nullish(),
   "recommendation": zod.string().nullish(),
+  "remediations": zod.union([zod.object({
+  "nginx": zod.string().optional(),
+  "apache": zod.string().optional(),
+  "nodejs": zod.string().optional(),
+  "iis": zod.string().optional(),
+  "caddy": zod.string().optional(),
+  "cloudflare": zod.string().optional(),
+  "php": zod.string().optional(),
+  "python": zod.string().optional(),
+  "java": zod.string().optional(),
+  "ruby": zod.string().optional()
+}).describe('Technology-specific remediation code snippets. Each key is a platform\/framework slug, value is a ready-to-use configuration or code snippet.'),zod.null()]).optional(),
   "execution_poc": zod.string().nullish().describe('Step-by-step proof-of-concept: how an attacker or tester would verify and exploit this finding, including commands (curl, Burp Suite, browser) and expected outcome.')
 })),
   "summary": zod.object({

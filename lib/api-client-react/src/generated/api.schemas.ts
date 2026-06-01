@@ -20,6 +20,22 @@ export interface ScanInput {
   crawl_enabled?: boolean;
 }
 
+/**
+ * Technology-specific remediation code snippets. Each key is a platform/framework slug, value is a ready-to-use configuration or code snippet.
+ */
+export interface RemediationMap {
+  nginx?: string;
+  apache?: string;
+  nodejs?: string;
+  iis?: string;
+  caddy?: string;
+  cloudflare?: string;
+  php?: string;
+  python?: string;
+  java?: string;
+  ruby?: string;
+}
+
 export type ScanFindingCategory = typeof ScanFindingCategory[keyof typeof ScanFindingCategory];
 
 
@@ -66,6 +82,7 @@ export interface ScanFinding {
   detail?: string | null;
   /** @nullable */
   recommendation?: string | null;
+  remediations?: RemediationMap | null;
   /**
      * Step-by-step proof-of-concept: how an attacker or tester would verify and exploit this finding, including commands (curl, Burp Suite, browser) and expected outcome.
      * @nullable

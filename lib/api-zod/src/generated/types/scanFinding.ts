@@ -5,6 +5,7 @@
  * Web Vulnerability Scanner API
  * OpenAPI spec version: 0.1.0
  */
+import type { RemediationMap } from './remediationMap';
 import type { ScanFindingCategory } from './scanFindingCategory';
 import type { ScanFindingSeverity } from './scanFindingSeverity';
 import type { ScanFindingStatus } from './scanFindingStatus';
@@ -20,6 +21,7 @@ export interface ScanFinding {
   detail?: string | null;
   /** @nullable */
   recommendation?: string | null;
+  remediations?: RemediationMap | null;
   /**
      * Step-by-step proof-of-concept: how an attacker or tester would verify and exploit this finding, including commands (curl, Burp Suite, browser) and expected outcome.
      * @nullable

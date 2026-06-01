@@ -148,6 +148,31 @@ components:
           type: boolean
           description: "When true, the scanner first spiders the target domain to discover internal links, forms, and endpoints, then runs injection checks against all discovered URLs with query parameters."
 
+    RemediationMap:
+      type: object
+      description: "Technology-specific remediation code snippets. Each key is a platform/framework slug, value is a ready-to-use configuration or code snippet."
+      properties:
+        nginx:
+          type: string
+        apache:
+          type: string
+        nodejs:
+          type: string
+        iis:
+          type: string
+        caddy:
+          type: string
+        cloudflare:
+          type: string
+        php:
+          type: string
+        python:
+          type: string
+        java:
+          type: string
+        ruby:
+          type: string
+
     ScanFinding:
       type: object
       required:
@@ -177,6 +202,10 @@ components:
           type: ["string", "null"]
         recommendation:
           type: ["string", "null"]
+        remediations:
+          oneOf:
+            - $ref: "#/components/schemas/RemediationMap"
+            - type: "null"
         execution_poc:
           type: ["string", "null"]
           description: "Step-by-step proof-of-concept: how an attacker or tester would verify and exploit this finding, including commands (curl, Burp Suite, browser) and expected outcome."

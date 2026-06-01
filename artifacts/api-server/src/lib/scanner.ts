@@ -9,6 +9,19 @@ import type { ProgressCallback } from "./scan-events.js";
 
 const INJECTION_CONCURRENCY = 5;
 
+export interface RemediationMap {
+  nginx?: string;
+  apache?: string;
+  nodejs?: string;
+  iis?: string;
+  caddy?: string;
+  cloudflare?: string;
+  php?: string;
+  python?: string;
+  java?: string;
+  ruby?: string;
+}
+
 export interface ScanFinding {
   id: string;
   category: "dns" | "ssl" | "headers" | "server_info" | "content_discovery" | "http_methods" | "sensitive_files" | "injection";
@@ -18,6 +31,7 @@ export interface ScanFinding {
   description: string;
   detail?: string | null;
   recommendation?: string | null;
+  remediations?: RemediationMap | null;
   execution_poc?: string | null;
 }
 
@@ -60,6 +74,654 @@ interface FetchResult {
   responseTimeMs: number;
   sslValid?: boolean;
   sslExpiry?: string | null;
+}
+
+// ── Technology-specific remediation lookup ────────────────────────────────────
+
+const HEADER_TABS = (header: string, value: string): RemediationMap => ({
+  nginx:
+`# In your nginx server{} block
+add_header ${header} "${value}" always;`,
+  apache:
+`# In httpd.conf / .htaccess (requires mod_headers)
+Header always set ${header} "${value}"`,
+  nodejs:
+`// With Helmet (recommended)
+import helmet from 'helmet';
+app.use(helmet()); // enables many headers automatically
+
+// Or manually:
+app.use((_req, res, next) => {
+  res.setHeader('${header}', '${value}');
+  next();
+});`,
+  iis:
+`<!-- In web.config <system.webServer> -->
+<httpProtocol>
+  <customHeaders>
+    <add name="${header}" value="${value}" />
+  </customHeaders>
+</httpProtocol>`,
+  caddy:
+`# In your Caddyfile site block
+header ${header} "${value}"`,
+});
+
+const REMEDIATION_MAP: Record<string, RemediationMap> = {
+  "missing-hsts": {
+    nginx:
+`# In your nginx server{} block (HTTPS only)
+add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;`,
+    apache:
+`# In httpd.conf / .htaccess (requires mod_headers + HTTPS vhost)
+Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"`,
+    nodejs:
+`// With Helmet
+import helmet from 'helmet';
+app.use(helmet.hsts({
+  maxAge: 31536000,
+  includeSubDomains: true,
+  preload: true,
+}));`,
+    iis:
+`<!-- In web.config -->
+<httpProtocol>
+  <customHeaders>
+    <add name="Strict-Transport-Security"
+         value="max-age=31536000; includeSubDomains; preload" />
+  </customHeaders>
+</httpProtocol>`,
+    caddy:
+`# Caddy sets HSTS automatically on HTTPS sites
+# To customise, add to your Caddyfile:
+header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"`,
+    cloudflare:
+`# Option 1 — Cloudflare Dashboard (recommended, no server changes needed):
+# SSL/TLS → Edge Certificates → HTTP Strict Transport Security (HSTS)
+# Enable HSTS, set max-age = 12 months, turn on includeSubDomains + Preload.
+
+# Option 2 — Cloudflare Transform Rule (Modify Response Header):
+# Rules → Transform Rules → Create Rule → Modify Response Header
+# Action: Set  |  Name: Strict-Transport-Security
+# Value: max-age=31536000; includeSubDomains; preload`,
+  },
+
+  "hsts-wrong-url": {
+    nginx:
+`# HSTS must be set on the HTTPS virtual host, not HTTP
+server {
+  listen 80;
+  server_name example.com;
+  return 301 https://$host$request_uri; # redirect to HTTPS
+}
+server {
+  listen 443 ssl;
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+}`,
+    apache:
+`# .htaccess — redirect HTTP to HTTPS first
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteCond %{HTTPS} off
+  RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+</IfModule>
+# Then set HSTS only in the HTTPS VirtualHost
+Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains"`,
+    nodejs:
+`app.use((req, res, next) => {
+  if (!req.secure && process.env.NODE_ENV === 'production') {
+    return res.redirect(301, 'https://' + req.headers.host + req.url);
+  }
+  // Set HSTS only on HTTPS connections
+  if (req.secure) {
+    res.setHeader('Strict-Transport-Security',
+      'max-age=31536000; includeSubDomains; preload');
+  }
+  next();
+});`,
+    iis: HEADER_TABS("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload").iis!,
+    caddy: HEADER_TABS("Strict-Transport-Security", "max-age=31536000; includeSubDomains; preload").caddy!,
+  },
+
+  "missing-csp": {
+    nginx:
+`# In your nginx server{} block
+add_header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self'; frame-ancestors 'none';" always;`,
+    apache:
+`# In httpd.conf / .htaccess
+Header always set Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; frame-ancestors 'none';"`,
+    nodejs:
+`// With Helmet (recommended)
+import helmet from 'helmet';
+app.use(helmet.contentSecurityPolicy({
+  directives: {
+    defaultSrc:  ["'self'"],
+    scriptSrc:   ["'self'"],
+    styleSrc:    ["'self'", "'unsafe-inline'"],
+    imgSrc:      ["'self'", "data:"],
+    fontSrc:     ["'self'"],
+    frameAncestors: ["'none'"],
+  },
+}));`,
+    iis:
+`<!-- In web.config -->
+<httpProtocol>
+  <customHeaders>
+    <add name="Content-Security-Policy"
+         value="default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none';" />
+  </customHeaders>
+</httpProtocol>`,
+    caddy:
+`header Content-Security-Policy "default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none';"`,
+    cloudflare:
+`# Cloudflare Transform Rules → Modify Response Header
+# Rules → Transform Rules → Create Rule → Modify Response Header
+# Action: Set  |  Name: Content-Security-Policy
+# Value: default-src 'self'; script-src 'self'; style-src 'self' 'unsafe-inline'; frame-ancestors 'none';
+#
+# Note: Test your CSP thoroughly — overly strict policies can break your site.
+# Use report-only mode first: Content-Security-Policy-Report-Only`,
+  },
+
+  "missing-x-frame-options": {
+    ...HEADER_TABS("X-Frame-Options", "SAMEORIGIN"),
+    nodejs:
+`// With Helmet
+app.use(helmet.frameguard({ action: 'sameorigin' }));
+
+// Or manually:
+app.use((_req, res, next) => {
+  res.setHeader('X-Frame-Options', 'SAMEORIGIN');
+  next();
+});`,
+    cloudflare:
+`# Cloudflare Transform Rules → Modify Response Header
+# Rules → Transform Rules → Create Rule → Modify Response Header
+# Action: Set  |  Name: X-Frame-Options  |  Value: SAMEORIGIN`,
+  },
+
+  "missing-x-content-type": {
+    ...HEADER_TABS("X-Content-Type-Options", "nosniff"),
+    nodejs:
+`// With Helmet
+app.use(helmet.noSniff());
+
+// Or manually:
+app.use((_req, res, next) => {
+  res.setHeader('X-Content-Type-Options', 'nosniff');
+  next();
+});`,
+    cloudflare:
+`# Cloudflare Transform Rules → Modify Response Header
+# Rules → Transform Rules → Create Rule → Modify Response Header
+# Action: Set  |  Name: X-Content-Type-Options  |  Value: nosniff`,
+  },
+
+  "missing-referrer-policy": {
+    ...HEADER_TABS("Referrer-Policy", "strict-origin-when-cross-origin"),
+    nodejs:
+`// With Helmet
+app.use(helmet.referrerPolicy({
+  policy: 'strict-origin-when-cross-origin',
+}));`,
+    cloudflare:
+`# Cloudflare Transform Rules → Modify Response Header
+# Rules → Transform Rules → Create Rule → Modify Response Header
+# Action: Set  |  Name: Referrer-Policy  |  Value: strict-origin-when-cross-origin`,
+  },
+
+  "missing-permissions-policy": {
+    ...HEADER_TABS("Permissions-Policy", "camera=(), microphone=(), geolocation=(), payment=()"),
+    nodejs:
+`// With Helmet (v5+)
+app.use(helmet.permittedCrossDomainPolicies());
+
+// Or set manually:
+app.use((_req, res, next) => {
+  res.setHeader('Permissions-Policy',
+    'camera=(), microphone=(), geolocation=(), payment=()');
+  next();
+});`,
+    cloudflare:
+`# Cloudflare Transform Rules → Modify Response Header
+# Rules → Transform Rules → Create Rule → Modify Response Header
+# Action: Set  |  Name: Permissions-Policy
+# Value: camera=(), microphone=(), geolocation=(), payment=()`,
+  },
+
+  "missing-https": {
+    nginx:
+`# Redirect all HTTP traffic to HTTPS
+server {
+  listen 80;
+  server_name example.com www.example.com;
+  return 301 https://$host$request_uri;
+}
+
+server {
+  listen 443 ssl http2;
+  server_name example.com;
+  # ... your SSL config here
+  add_header Strict-Transport-Security "max-age=31536000; includeSubDomains; preload" always;
+}`,
+    apache:
+`# In your HTTP VirtualHost or .htaccess
+<IfModule mod_rewrite.c>
+  RewriteEngine On
+  RewriteCond %{HTTPS} off
+  RewriteRule ^ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+</IfModule>
+
+# In the HTTPS VirtualHost, also add HSTS:
+Header always set Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"`,
+    nodejs:
+`// Redirect HTTP → HTTPS in production
+app.use((req, res, next) => {
+  const proto = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+  if (proto !== 'https' && process.env.NODE_ENV === 'production') {
+    return res.redirect(301, 'https://' + req.headers.host + req.url);
+  }
+  next();
+});`,
+    iis:
+`<!-- web.config: HTTP → HTTPS redirect -->
+<system.webServer>
+  <rewrite>
+    <rules>
+      <rule name="HTTP to HTTPS" stopProcessing="true">
+        <match url=".*" />
+        <conditions>
+          <add input="{HTTPS}" pattern="off" ignoreCase="true" />
+        </conditions>
+        <action type="Redirect" url="https://{HTTP_HOST}/{R:0}"
+                redirectType="Permanent" />
+      </rule>
+    </rules>
+  </rewrite>
+</system.webServer>`,
+    caddy:
+`# Caddy handles HTTPS and HTTP→HTTPS redirection automatically.
+# Simply use your domain name — Caddy auto-provisions TLS via Let's Encrypt:
+example.com {
+  # Your site config here — Caddy does the rest
+}`,
+    cloudflare:
+`# In Cloudflare Dashboard → SSL/TLS → Edge Certificates:
+# 1. Set SSL/TLS Mode to "Full (strict)"
+# 2. Enable "Always Use HTTPS" toggle
+# 3. Enable "HSTS" with max-age=31536000, includeSubDomains, preload
+# 4. Enable "Automatic HTTPS Rewrites"
+
+# Via Cloudflare API / Terraform:
+resource "cloudflare_zone_settings_override" "https" {
+  zone_id = var.zone_id
+  settings {
+    always_use_https = "on"
+    ssl              = "strict"
+    min_tls_version  = "1.2"
+  }
+}`,
+  },
+
+  "server-info-leaked": {
+    nginx:
+`# In nginx.conf (http{} block)
+server_tokens off;
+
+# For extra hardening, use headers-more-nginx-module:
+# more_clear_headers Server;`,
+    apache:
+`# In httpd.conf or apache2.conf
+ServerTokens Prod
+ServerSignature Off`,
+    nodejs:
+`// Express removes X-Powered-By by default with Helmet:
+import helmet from 'helmet';
+app.use(helmet());
+
+// Or just:
+app.disable('x-powered-by');`,
+    iis:
+`<!-- In web.config — remove Server header -->
+<system.webServer>
+  <security>
+    <requestFiltering removeServerHeader="true" />
+  </security>
+  <httpProtocol>
+    <customHeaders>
+      <remove name="X-Powered-By" />
+      <remove name="X-AspNet-Version" />
+    </customHeaders>
+  </httpProtocol>
+</system.webServer>`,
+    caddy:
+`# Caddy doesn't expose version by default.
+# Remove or replace the Server header:
+header -Server
+header -X-Powered-By`,
+  },
+
+  "x-powered-by-leaked": {
+    nginx:
+`# Nginx does not add X-Powered-By by default.
+# If you see it, your app framework adds it.
+# Suppress with headers-more-nginx-module:
+# more_clear_headers X-Powered-By;`,
+    apache:
+`# Disable PHP's X-Powered-By (in php.ini):
+expose_php = Off
+
+# Or strip it in Apache:
+Header always unset X-Powered-By`,
+    nodejs:
+`// Remove Express's default X-Powered-By header:
+app.disable('x-powered-by');
+
+// Or with Helmet (does this automatically):
+import helmet from 'helmet';
+app.use(helmet());`,
+    iis:
+`<!-- In web.config -->
+<httpProtocol>
+  <customHeaders>
+    <remove name="X-Powered-By" />
+    <remove name="X-AspNet-Version" />
+    <remove name="X-AspNetMvc-Version" />
+  </customHeaders>
+</httpProtocol>`,
+    caddy:
+`header -X-Powered-By`,
+  },
+
+  "trace-enabled": {
+    nginx:
+`# Deny TRACE method globally in nginx.conf
+map $request_method $block_trace {
+  default 0;
+  TRACE   1;
+}
+
+server {
+  if ($block_trace) { return 405; }
+}`,
+    apache:
+`# In httpd.conf or apache2.conf (global)
+TraceEnable Off`,
+    nodejs:
+`// Middleware to block TRACE requests
+app.use((req, res, next) => {
+  if (req.method === 'TRACE') {
+    return res.status(405).set('Allow', 'GET,POST,PUT,DELETE,PATCH,OPTIONS,HEAD')
+                           .send('Method Not Allowed');
+  }
+  next();
+});`,
+    iis:
+`<!-- In web.config: disable TRACE verb -->
+<system.webServer>
+  <security>
+    <requestFiltering>
+      <verbs>
+        <add verb="TRACE" allowed="false" />
+        <add verb="TRACK" allowed="false" />
+      </verbs>
+    </requestFiltering>
+  </security>
+</system.webServer>`,
+    caddy:
+`# Block TRACE method in Caddyfile
+@trace method TRACE TRACK
+respond @trace 405`,
+  },
+
+  "missing-spf": {
+    cloudflare:
+`# Add an SPF TXT record in your DNS zone (Cloudflare Dashboard → DNS):
+Type:    TXT
+Name:    @  (root domain)
+Content: v=spf1 include:_spf.google.com ~all
+TTL:     Auto
+
+# Adjust the include: directive to match your mail provider:
+# Google Workspace: include:_spf.google.com
+# Microsoft 365:    include:spf.protection.outlook.com
+# SendGrid:         include:sendgrid.net`,
+    nginx:
+`# SPF is a DNS record — configure it at your DNS provider, not your web server.
+# Example TXT record to add:
+# @ IN TXT "v=spf1 include:_spf.google.com ~all"
+
+# If using Bind / named:
+example.com. IN TXT "v=spf1 include:_spf.google.com ~all"`,
+    apache:
+`# SPF is a DNS record — configure it at your DNS provider, not Apache.
+# Example TXT record:
+@ IN TXT "v=spf1 include:_spf.google.com ~all"
+
+# Common include values:
+# Google Workspace: include:_spf.google.com
+# Microsoft 365:    include:spf.protection.outlook.com`,
+    nodejs:
+`// SPF is a DNS record — add via your DNS provider or infrastructure as code.
+// Example with AWS Route 53 (Terraform):
+resource "aws_route53_record" "spf" {
+  zone_id = aws_route53_zone.primary.zone_id
+  name    = "@"
+  type    = "TXT"
+  ttl     = 300
+  records = [
+    "v=spf1 include:_spf.google.com ~all"
+  ]
+}`,
+  },
+
+  "missing-dmarc": {
+    cloudflare:
+`# Add a DMARC TXT record in Cloudflare Dashboard → DNS:
+Type:    TXT
+Name:    _dmarc
+Content: v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com; ruf=mailto:dmarc@example.com; adkim=s; aspf=s
+TTL:     Auto
+
+# Policy values: none (monitor) → quarantine → reject (strict)
+# Start with p=none to monitor, then move to quarantine/reject`,
+    nginx:
+`# DMARC is a DNS record — add via your DNS provider.
+# Example TXT record:
+_dmarc.example.com. IN TXT "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com"
+
+# Policy guidance:
+# p=none       — monitoring only, no enforcement
+# p=quarantine — suspect mail goes to spam
+# p=reject     — fail outright (most protective)`,
+    apache:
+`# DMARC is a DNS record — add via your DNS provider, not Apache.
+# Example:
+_dmarc IN TXT "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com; adkim=s; aspf=s"`,
+    nodejs:
+`// DMARC is a DNS record. Add via infrastructure as code:
+// AWS Route 53 (Terraform):
+resource "aws_route53_record" "dmarc" {
+  zone_id = aws_route53_zone.primary.zone_id
+  name    = "_dmarc"
+  type    = "TXT"
+  ttl     = 300
+  records = [
+    "v=DMARC1; p=quarantine; rua=mailto:dmarc@example.com"
+  ]
+}`,
+  },
+
+  // Injection: SQLi — code-level remediations
+  "injection-sqli": {
+    nodejs:
+`// NEVER interpolate user input into SQL strings.
+// Use parameterized queries (node-postgres):
+import { Pool } from 'pg';
+const pool = new Pool();
+
+// ✓ Safe — parameter is sent separately
+const { rows } = await pool.query(
+  'SELECT * FROM users WHERE id = $1 AND name = $2',
+  [userId, userName]
+);
+
+// ✗ Unsafe — DO NOT DO THIS:
+// const { rows } = await pool.query(\`SELECT * FROM users WHERE id = \${userId}\`);`,
+    php:
+`<?php
+// Use PDO prepared statements — NEVER concatenate user input into SQL.
+
+$pdo = new PDO('mysql:host=localhost;dbname=mydb', $user, $pass);
+$pdo->setAttribute(PDO::ATTR_EMULATE_PREPARES, false); // important!
+
+// ✓ Safe
+$stmt = $pdo->prepare('SELECT * FROM users WHERE id = :id AND name = :name');
+$stmt->execute([':id' => $id, ':name' => $name]);
+$rows = $stmt->fetchAll(PDO::FETCH_ASSOC);
+
+// ✗ Unsafe — DO NOT DO THIS:
+// $rows = $pdo->query("SELECT * FROM users WHERE id = $id");`,
+    python:
+`# Use Django ORM or SQLAlchemy — both parameterize automatically.
+
+# Django ORM (safe by default):
+from myapp.models import User
+user = User.objects.get(id=user_id, name=user_name)
+
+# Raw SQL with Django (still parameterized):
+from django.db import connection
+with connection.cursor() as cursor:
+    cursor.execute('SELECT * FROM users WHERE id = %s', [user_id])
+    rows = cursor.fetchall()
+
+# SQLAlchemy Core:
+from sqlalchemy import text
+result = conn.execute(text('SELECT * FROM users WHERE id = :id'), {'id': user_id})`,
+    java:
+`// Use PreparedStatement — NEVER use Statement with string concat.
+import java.sql.*;
+
+// ✓ Safe
+String sql = "SELECT * FROM users WHERE id = ? AND name = ?";
+try (PreparedStatement stmt = conn.prepareStatement(sql)) {
+    stmt.setInt(1, userId);
+    stmt.setString(2, userName);
+    ResultSet rs = stmt.executeQuery();
+}
+
+// Spring Data JPA (safest):
+@Query("SELECT u FROM User u WHERE u.id = :id")
+User findById(@Param("id") Long id);`,
+    ruby:
+`# ActiveRecord parameterizes queries automatically.
+# ✓ Safe
+User.where(id: user_id, name: user_name)
+User.where('id = ? AND name = ?', user_id, user_name)
+
+# ✗ Unsafe — DO NOT DO THIS:
+# User.where("id = #{user_id}")  # string interpolation = SQL injection`,
+  },
+
+  // Injection: XSS — output encoding remediations
+  "injection-xss": {
+    nodejs:
+`// Always encode output. Use a template engine with auto-escaping.
+
+// React JSX is safe by default (JSX escapes values automatically):
+const UserInput = ({ text }) => <div>{text}</div>; // ✓ Safe
+
+// Avoid dangerouslySetInnerHTML unless you sanitize first:
+import DOMPurify from 'dompurify';
+<div dangerouslySetInnerHTML={{ __html: DOMPurify.sanitize(dirty) }} />
+
+// In Express with EJS (auto-escaped):
+// Use <%= variable %> (escaped) not <%- variable %> (raw)
+
+// For API responses, set Content-Type correctly:
+res.setHeader('Content-Type', 'application/json');`,
+    php:
+`<?php
+// Always use htmlspecialchars() for output in HTML context.
+// ✓ Safe
+echo htmlspecialchars($userInput, ENT_QUOTES | ENT_HTML5, 'UTF-8');
+
+// With Twig template engine (auto-escapes by default):
+// {{ user_input }}          — escaped (safe)
+// {{ user_input | raw }}    — raw (only use when sure it's safe)
+
+// For rich HTML content, use HTML Purifier:
+require_once '/path/to/htmlpurifier/library/HTMLPurifier.auto.php';
+$config = HTMLPurifier_Config::createDefault();
+$purifier = new HTMLPurifier($config);
+$clean = $purifier->purify($dirty);`,
+    python:
+`# Django templates auto-escape all variables by default.
+# {{ user_input }}        — auto-escaped (safe)
+# {{ user_input|safe }}   — raw (only use when you control the content)
+
+# For manual escaping:
+from django.utils.html import escape, format_html
+safe_output = escape(user_input)
+
+# Jinja2 also auto-escapes when configured:
+from jinja2 import Environment
+env = Environment(autoescape=True)
+
+# For rich HTML: use bleach
+import bleach
+clean = bleach.clean(user_input, tags=['b', 'i', 'u'], strip=True)`,
+    java:
+`// Use OWASP Java Encoder for all output encoding.
+import org.owasp.encoder.Encode;
+
+// HTML context:
+out.print("<div>" + Encode.forHtml(userInput) + "</div>");
+
+// JavaScript context:
+out.print("<script>var x = '" + Encode.forJavaScript(userInput) + "';</script>");
+
+// Spring Thymeleaf (auto-escapes):
+// th:text="\${userInput}"    — escaped (safe)
+// th:utext="\${userInput}"   — raw (avoid unless sanitized)`,
+    ruby:
+`# Rails ERB auto-escapes by default.
+# <%= user_input %>       — auto-escaped (safe)
+# <%== user_input %>      — raw HTML (avoid unless sanitized)
+# <%= raw(user_input) %>  — raw HTML (avoid unless sanitized)
+
+# For sanitizing HTML content:
+ActionView::Base.sanitized_allowed_tags = ['b', 'i', 'strong', 'em']
+sanitized = ActionController::Base.helpers.sanitize(user_input)
+
+# Use rails-html-sanitizer for fine-grained control:
+sanitizer = Rails::Html::SafeListSanitizer.new
+safe = sanitizer.sanitize(user_input, tags: %w[b i ul li])`,
+  },
+};
+
+// Alias stored-XSS to same remediations as reflected XSS
+REMEDIATION_MAP["injection-stored-xss"] = REMEDIATION_MAP["injection-xss"];
+
+/**
+ * Post-processes findings to attach structured technology-specific remediations.
+ * Matches by exact finding ID first, then by category prefix for injection findings.
+ */
+function withRemediations(findings: ScanFinding[]): ScanFinding[] {
+  return findings.map((f) => {
+    let remediations: RemediationMap | null = null;
+
+    if (REMEDIATION_MAP[f.id]) {
+      remediations = REMEDIATION_MAP[f.id];
+    } else if (f.category === "injection") {
+      // Match by prefix: injection-sqli-* → injection-sqli, injection-xss-* / injection-stored-xss-* → injection-xss
+      if (f.id.includes("sqli"))       remediations = REMEDIATION_MAP["injection-sqli"] ?? null;
+      else if (f.id.includes("stored")) remediations = REMEDIATION_MAP["injection-stored-xss"] ?? null;
+      else if (f.id.includes("xss"))   remediations = REMEDIATION_MAP["injection-xss"] ?? null;
+    }
+
+    return remediations ? { ...f, remediations } : f;
+  });
 }
 
 function fetchUrl(targetUrl: string, method = "GET", timeout = 10000): Promise<FetchResult> {
@@ -1949,7 +2611,7 @@ export async function runScan(
   };
 
   return {
-    findings: allFindings,
+    findings: withRemediations(allFindings),
     summary,
     responseTimeMs: mainFetch.responseTimeMs,
     serverInfo: headerStr(mainFetch.headers["server"]) ?? null,

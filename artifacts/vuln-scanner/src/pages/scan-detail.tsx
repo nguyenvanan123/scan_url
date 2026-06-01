@@ -17,6 +17,8 @@ import { Badge } from "@/components/ui/badge";
 import { Skeleton } from "@/components/ui/skeleton";
 import { ScanFinding, ScanFindingCategory } from "@workspace/api-zod";
 import { PocTerminal } from "@/components/poc-terminal";
+import { RemediationTabs } from "@/components/remediation-tabs";
+import { getClientRemediations } from "@/lib/remediation-data";
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"] as const;
 
@@ -182,9 +184,10 @@ function LiveScanProgress({ scanId, url }: { scanId: number; url: string }) {
 interface FindingCardProps {
   finding: ScanFinding;
   scanUrl: string;
+  serverInfo?: string | null;
 }
 
-function FindingCard({ finding, scanUrl }: FindingCardProps) {
+function FindingCard({ finding, scanUrl, serverInfo }: FindingCardProps) {
   const [expanded, setExpanded] = useState(false);
 
   const severityConfig = getSeverityConfig(finding.severity);
@@ -225,14 +228,31 @@ function FindingCard({ finding, scanUrl }: FindingCardProps) {
             </div>
           )}
 
-          {finding.recommendation && (
-            <div>
-              <div className="text-[10px] font-mono font-bold text-muted-foreground uppercase tracking-widest mb-1">Remediation</div>
-              <div className={`p-3 rounded text-sm font-sans leading-relaxed ${severityConfig.remediationBg} ${severityConfig.remediationText} border ${severityConfig.remediationBorder}`}>
-                {finding.recommendation}
+          {(() => {
+            const storedRem = finding.remediations && Object.values(finding.remediations).some(Boolean)
+              ? finding.remediations
+              : null;
+            const clientRem = !storedRem
+              ? getClientRemediations(finding.id, finding.category)
+              : null;
+            const remediations = storedRem ?? clientRem;
+            return (remediations || finding.recommendation) ? (
+              <div>
+                <div className="text-[10px] font-mono font-bold text-muted-foreground uppercase tracking-widest mb-2">Remediation</div>
+                {remediations ? (
+                  <RemediationTabs
+                    remediations={remediations}
+                    serverInfo={serverInfo}
+                    category={finding.category}
+                  />
+                ) : (
+                  <div className={`p-3 rounded text-sm font-sans leading-relaxed ${severityConfig.remediationBg} ${severityConfig.remediationText} border ${severityConfig.remediationBorder}`}>
+                    {finding.recommendation}
+                  </div>
+                )}
               </div>
-            </div>
-          )}
+            ) : null;
+          })()}
 
           {finding.execution_poc && (
             <div>
@@ -406,7 +426,7 @@ export default function ScanDetail() {
                   {severity} <span className="font-normal text-muted-foreground">({findings.length})</span>
                 </div>
                 <div className="space-y-2">
-                  {findings.map((f) => <FindingCard key={f.id} finding={f} scanUrl={scan.url} />)}
+                  {findings.map((f) => <FindingCard key={f.id} finding={f} scanUrl={scan.url} serverInfo={scan.result?.serverInfo} />)}
                 </div>
               </section>
             );

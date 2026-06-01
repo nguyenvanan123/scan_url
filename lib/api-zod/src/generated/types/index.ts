@@ -8,6 +8,7 @@
 
 export * from './errorResponse';
 export * from './healthStatus';
+export * from './remediationMap';
 export * from './scan';
 export * from './scanFinding';
 export * from './scanFindingCategory';
