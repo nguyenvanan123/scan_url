@@ -6,7 +6,8 @@ import {
   ShieldAlert, ShieldCheck, AlertTriangle,
   Info, ArrowLeft, Server, Lock, Globe,
   FileCode, CheckCircle2, XCircle, Activity,
-  ChevronDown, ChevronUp, Search, FolderLock, Syringe
+  ChevronDown, ChevronUp, Search, FolderLock, Syringe,
+  Globe2, Link2, FormInput, Code2
 } from "lucide-react";
 import { Link } from "wouter";
 
@@ -196,6 +197,7 @@ export default function ScanDetail() {
 
   const { data: scan, isLoading } = useGetScan(id, {
     query: {
+      queryKey: getGetScanQueryKey(id),
       enabled: !!id,
       refetchInterval: (query) => {
         const status = query.state.data?.status;
@@ -293,6 +295,11 @@ export default function ScanDetail() {
             />
           </div>
 
+          {/* Spider / Crawl summary */}
+          {scan.result.crawlSummary && (
+            <CrawlSummarySection crawlSummary={scan.result.crawlSummary as any} />
+          )}
+
           {/* Summary pills */}
           <div className="flex flex-wrap items-center gap-2">
             <span className="text-xs font-mono text-muted-foreground uppercase tracking-widest">Summary</span>
@@ -340,6 +347,146 @@ export default function ScanDetail() {
         </>
       )}
     </div>
+  );
+}
+
+interface CrawlSummaryData {
+  pagesVisited: number;
+  urlsDiscovered: number;
+  urlsWithParams: string[];
+  urls: string[];
+  jsFiles: string[];
+  errors: string[];
+}
+
+function CrawlSummarySection({ crawlSummary }: { crawlSummary: CrawlSummaryData }) {
+  const [expanded, setExpanded] = useState(false);
+  const [showAll, setShowAll] = useState(false);
+
+  const displayUrls = showAll ? crawlSummary.urls : crawlSummary.urls.slice(0, 10);
+
+  return (
+    <Card className="border-primary/20 bg-card/80">
+      <CardContent className="pt-4 pb-4 px-4">
+        {/* Header row */}
+        <button
+          type="button"
+          className="w-full flex items-center gap-3 text-left"
+          onClick={() => setExpanded((v) => !v)}
+        >
+          <Globe2 className="w-4 h-4 text-primary flex-shrink-0" />
+          <span className="font-mono text-xs font-bold uppercase tracking-widest text-primary flex-1">
+            Spider Results
+          </span>
+          <div className="flex items-center gap-3 text-[11px] font-mono text-muted-foreground">
+            <span className="flex items-center gap-1">
+              <FileCode className="w-3 h-3" />
+              {crawlSummary.pagesVisited} pages
+            </span>
+            <span className="flex items-center gap-1">
+              <Link2 className="w-3 h-3" />
+              {crawlSummary.urlsDiscovered} URLs
+            </span>
+            {crawlSummary.urlsWithParams.length > 0 && (
+              <span className="flex items-center gap-1 text-yellow-500 dark:text-yellow-400">
+                <Syringe className="w-3 h-3" />
+                {crawlSummary.urlsWithParams.length} injection targets
+              </span>
+            )}
+            {crawlSummary.jsFiles.length > 0 && (
+              <span className="flex items-center gap-1">
+                <Code2 className="w-3 h-3" />
+                {crawlSummary.jsFiles.length} JS files
+              </span>
+            )}
+          </div>
+          {expanded ? (
+            <ChevronUp className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+          ) : (
+            <ChevronDown className="w-4 h-4 text-muted-foreground flex-shrink-0" />
+          )}
+        </button>
+
+        {expanded && (
+          <div className="mt-4 space-y-4">
+            {/* Injection targets */}
+            {crawlSummary.urlsWithParams.length > 0 && (
+              <div>
+                <div className="flex items-center gap-2 mb-2 text-[10px] font-mono text-yellow-500 dark:text-yellow-400 uppercase tracking-widest">
+                  <Syringe className="w-3 h-3" />
+                  Injection Targets ({crawlSummary.urlsWithParams.length} URLs with query params)
+                </div>
+                <div className="rounded border border-yellow-500/20 bg-yellow-500/5 p-2 max-h-40 overflow-y-auto space-y-0.5">
+                  {crawlSummary.urlsWithParams.map((u, i) => (
+                    <div key={i} className="font-mono text-[11px] text-yellow-700 dark:text-yellow-300 truncate" title={u}>
+                      {u}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* All discovered URLs */}
+            <div>
+              <div className="flex items-center gap-2 mb-2 text-[10px] font-mono text-muted-foreground uppercase tracking-widest">
+                <Link2 className="w-3 h-3" />
+                Discovered Internal URLs ({crawlSummary.urlsDiscovered})
+              </div>
+              <div className="rounded border border-border/40 bg-muted/20 p-2 max-h-56 overflow-y-auto space-y-0.5">
+                {displayUrls.map((u, i) => (
+                  <div key={i} className="font-mono text-[11px] text-muted-foreground truncate" title={u}>
+                    {u}
+                  </div>
+                ))}
+                {!showAll && crawlSummary.urls.length > 10 && (
+                  <button
+                    type="button"
+                    className="text-[11px] font-mono text-primary mt-1 hover:underline"
+                    onClick={() => setShowAll(true)}
+                  >
+                    + {crawlSummary.urls.length - 10} more…
+                  </button>
+                )}
+              </div>
+            </div>
+
+            {/* JS files */}
+            {crawlSummary.jsFiles.length > 0 && (
+              <div>
+                <div className="flex items-center gap-2 mb-2 text-[10px] font-mono text-muted-foreground uppercase tracking-widest">
+                  <Code2 className="w-3 h-3" />
+                  JavaScript Files ({crawlSummary.jsFiles.length})
+                </div>
+                <div className="rounded border border-border/40 bg-muted/20 p-2 max-h-32 overflow-y-auto space-y-0.5">
+                  {crawlSummary.jsFiles.slice(0, 20).map((u, i) => (
+                    <div key={i} className="font-mono text-[11px] text-muted-foreground truncate" title={u}>
+                      {u}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* Crawler errors */}
+            {crawlSummary.errors.length > 0 && (
+              <div>
+                <div className="flex items-center gap-2 mb-2 text-[10px] font-mono text-destructive/60 uppercase tracking-widest">
+                  <XCircle className="w-3 h-3" />
+                  Crawl Errors ({crawlSummary.errors.length})
+                </div>
+                <div className="rounded border border-destructive/20 bg-destructive/5 p-2 max-h-24 overflow-y-auto space-y-0.5">
+                  {crawlSummary.errors.slice(0, 10).map((e, i) => (
+                    <div key={i} className="font-mono text-[11px] text-destructive/70 truncate" title={e}>
+                      {e}
+                    </div>
+                  ))}
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+      </CardContent>
+    </Card>
   );
 }
 

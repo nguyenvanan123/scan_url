@@ -51,7 +51,15 @@ export const ListScansResponseItem = zod.object({
   "ipAddress": zod.string().nullish(),
   "sslValid": zod.boolean().nullish(),
   "sslExpiry": zod.string().nullish(),
-  "scannedAt": zod.string()
+  "scannedAt": zod.string(),
+  "crawlSummary": zod.object({
+  "pagesVisited": zod.number().optional(),
+  "urlsDiscovered": zod.number().optional(),
+  "urlsWithParams": zod.array(zod.string()).optional(),
+  "urls": zod.array(zod.string()).optional(),
+  "jsFiles": zod.array(zod.string()).optional(),
+  "errors": zod.array(zod.string()).optional()
+}).nullish()
 }).optional(),
   "errorMessage": zod.string().nullish(),
   "createdAt": zod.string(),
@@ -65,7 +73,8 @@ export const ListScansResponse = zod.array(ListScansResponseItem)
  * @summary Start a new scan
  */
 export const CreateScanBody = zod.object({
-  "url": zod.string().describe('The target URL to scan (must be a valid http\/https URL)')
+  "url": zod.string().describe('The target URL to scan (must be a valid http\/https URL)'),
+  "crawl_enabled": zod.boolean().optional().describe('When true, the scanner first spiders the target domain to discover internal links, forms, and endpoints, then runs injection checks against all discovered URLs with query parameters.')
 })
 
 
@@ -106,7 +115,15 @@ export const GetScanResponse = zod.object({
   "ipAddress": zod.string().nullish(),
   "sslValid": zod.boolean().nullish(),
   "sslExpiry": zod.string().nullish(),
-  "scannedAt": zod.string()
+  "scannedAt": zod.string(),
+  "crawlSummary": zod.object({
+  "pagesVisited": zod.number().optional(),
+  "urlsDiscovered": zod.number().optional(),
+  "urlsWithParams": zod.array(zod.string()).optional(),
+  "urls": zod.array(zod.string()).optional(),
+  "jsFiles": zod.array(zod.string()).optional(),
+  "errors": zod.array(zod.string()).optional()
+}).nullish()
 }).optional(),
   "errorMessage": zod.string().nullish(),
   "createdAt": zod.string(),
@@ -164,7 +181,15 @@ export const GetScanStatsResponse = zod.object({
   "ipAddress": zod.string().nullish(),
   "sslValid": zod.boolean().nullish(),
   "sslExpiry": zod.string().nullish(),
-  "scannedAt": zod.string()
+  "scannedAt": zod.string(),
+  "crawlSummary": zod.object({
+  "pagesVisited": zod.number().optional(),
+  "urlsDiscovered": zod.number().optional(),
+  "urlsWithParams": zod.array(zod.string()).optional(),
+  "urls": zod.array(zod.string()).optional(),
+  "jsFiles": zod.array(zod.string()).optional(),
+  "errors": zod.array(zod.string()).optional()
+}).nullish()
 }).optional(),
   "errorMessage": zod.string().nullish(),
   "createdAt": zod.string(),

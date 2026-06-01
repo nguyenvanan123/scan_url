@@ -15,6 +15,7 @@ export * from './scanFindingSeverity';
 export * from './scanFindingStatus';
 export * from './scanInput';
 export * from './scanResult';
+export * from './scanResultCrawlSummary';
 export * from './scanResultSummary';
 export * from './scanStats';
 export * from './scanStatus';

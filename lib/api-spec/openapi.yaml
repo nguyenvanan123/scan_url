@@ -144,6 +144,9 @@ components:
         url:
           type: string
           description: The target URL to scan (must be a valid http/https URL)
+        crawl_enabled:
+          type: boolean
+          description: "When true, the scanner first spiders the target domain to discover internal links, forms, and endpoints, then runs injection checks against all discovered URLs with query parameters."
 
     ScanFinding:
       type: object
@@ -227,6 +230,30 @@ components:
           type: ["string", "null"]
         scannedAt:
           type: string
+        crawlSummary:
+          type: object
+          nullable: true
+          properties:
+            pagesVisited:
+              type: integer
+            urlsDiscovered:
+              type: integer
+            urlsWithParams:
+              type: array
+              items:
+                type: string
+            urls:
+              type: array
+              items:
+                type: string
+            jsFiles:
+              type: array
+              items:
+                type: string
+            errors:
+              type: array
+              items:
+                type: string
 
     Scan:
       type: object

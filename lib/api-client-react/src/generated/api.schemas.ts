@@ -16,6 +16,8 @@ export interface ErrorResponse {
 export interface ScanInput {
   /** The target URL to scan (must be a valid http/https URL) */
   url: string;
+  /** When true, the scanner first spiders the target domain to discover internal links, forms, and endpoints, then runs injection checks against all discovered URLs with query parameters. */
+  crawl_enabled?: boolean;
 }
 
 export type ScanFindingCategory = typeof ScanFindingCategory[keyof typeof ScanFindingCategory];
@@ -81,6 +83,15 @@ export type ScanResultSummary = {
   passed: number;
 };
 
+export type ScanResultCrawlSummary = {
+  pagesVisited?: number;
+  urlsDiscovered?: number;
+  urlsWithParams?: string[];
+  urls?: string[];
+  jsFiles?: string[];
+  errors?: string[];
+} | null;
+
 export interface ScanResult {
   findings: ScanFinding[];
   summary: ScanResultSummary;
@@ -94,6 +105,7 @@ export interface ScanResult {
   /** @nullable */
   sslExpiry?: string | null;
   scannedAt: string;
+  crawlSummary?: ScanResultCrawlSummary;
 }
 
 export type ScanStatus = typeof ScanStatus[keyof typeof ScanStatus];

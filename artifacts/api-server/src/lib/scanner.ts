@@ -3,6 +3,7 @@ import http from "http";
 import dns from "dns/promises";
 import { URL } from "url";
 import { validateSensitiveFile, validateSqlInjection, validateXssReflection } from "./response-validator.js";
+import { crawl, CrawlResult } from "./crawler.js";
 
 export interface ScanFinding {
   id: string;
@@ -26,6 +27,15 @@ export interface ScanSummary {
   passed: number;
 }
 
+export interface CrawlSummary {
+  pagesVisited: number;
+  urlsDiscovered: number;
+  urlsWithParams: string[];
+  urls: string[];
+  jsFiles: string[];
+  errors: string[];
+}
+
 export interface ScanResult {
   findings: ScanFinding[];
   summary: ScanSummary;
@@ -35,6 +45,7 @@ export interface ScanResult {
   sslValid?: boolean | null;
   sslExpiry?: string | null;
   scannedAt: string;
+  crawlSummary?: CrawlSummary | null;
 }
 
 interface FetchResult {
@@ -1343,9 +1354,25 @@ nc -lvnp 80
   return findings;
 }
 
-export async function runScan(targetUrl: string): Promise<ScanResult> {
+export async function runScan(targetUrl: string, crawlEnabled = false): Promise<ScanResult> {
   const parsed = new URL(targetUrl);
   const hostname = parsed.hostname;
+
+  // ── Optional: spider the site to discover injection targets ──────────────
+  let crawlResult: CrawlResult | null = null;
+  let crawlSummary: CrawlSummary | null = null;
+
+  if (crawlEnabled) {
+    crawlResult = await crawl(targetUrl, { maxPages: 30, maxDepth: 3, concurrency: 5 });
+    crawlSummary = {
+      pagesVisited: crawlResult.pagesVisited,
+      urlsDiscovered: crawlResult.urls.length,
+      urlsWithParams: crawlResult.urlsWithParams,
+      urls: crawlResult.urls,
+      jsFiles: crawlResult.jsFiles,
+      errors: crawlResult.errors,
+    };
+  }
 
   let mainFetch: FetchResult;
   try {
@@ -1360,6 +1387,7 @@ export async function runScan(targetUrl: string): Promise<ScanResult> {
     ipAddress = addrs[0] ?? null;
   } catch {}
 
+  // ── Core single-URL checks (always run on target) ────────────────────────
   const [dnsFindings, sslFindings, contentFindings, httpMethodFindings, sensitiveFileFindings, sqliFindings, xssFindings] = await Promise.all([
     checkDns(hostname),
     checkSsl(targetUrl, mainFetch),
@@ -1373,6 +1401,61 @@ export async function runScan(targetUrl: string): Promise<ScanResult> {
   const headerFindings = checkSecurityHeaders(mainFetch.headers);
   const serverFindings = checkServerInfo(mainFetch.headers);
 
+  // ── Crawl-mode: run injection checks on every discovered URL with params ──
+  const extraSqliFindings: ScanFinding[] = [];
+  const extraXssFindings: ScanFinding[] = [];
+
+  if (crawlResult && crawlResult.urlsWithParams.length > 0) {
+    // Skip the root URL itself (already tested above), cap at 50 targets
+    const additionalTargets = crawlResult.urlsWithParams
+      .filter((u) => u.split("?")[0] !== targetUrl.split("?")[0])
+      .slice(0, 50);
+
+    const seen = new Set<string>();
+
+    // Run in batches of 5
+    const BATCH = 5;
+    for (let i = 0; i < additionalTargets.length; i += BATCH) {
+      const batch = additionalTargets.slice(i, i + BATCH);
+
+      // For each URL in the batch, run SQLi + XSS in parallel
+      const perUrlResults = await Promise.all(
+        batch.map(async (srcUrl, batchIdx) => {
+          const urlIdx = i + batchIdx;
+          const [sqli, xss] = await Promise.all([
+            checkSqlInjection(srcUrl),
+            checkXss(srcUrl),
+          ]);
+
+          // Tag findings with source URL + unique id suffix; keep only failures
+          const tag = (findings: ScanFinding[]): ScanFinding[] =>
+            findings
+              .filter((f) => f.status !== "pass")
+              .map((f) => ({
+                ...f,
+                id: `${f.id}-spider-${urlIdx}`,
+                title: `[Spider] ${f.title}`,
+                detail: f.detail
+                  ? `Found at: ${srcUrl}\n\n${f.detail}`
+                  : `Found at: ${srcUrl}`,
+              }))
+              .filter((f) => {
+                if (seen.has(f.id)) return false;
+                seen.add(f.id);
+                return true;
+              });
+
+          return { sqli: tag(sqli), xss: tag(xss) };
+        })
+      );
+
+      for (const r of perUrlResults) {
+        extraSqliFindings.push(...r.sqli);
+        extraXssFindings.push(...r.xss);
+      }
+    }
+  }
+
   const allFindings = [
     ...dnsFindings,
     ...sslFindings,
@@ -1383,6 +1466,8 @@ export async function runScan(targetUrl: string): Promise<ScanResult> {
     ...sensitiveFileFindings,
     ...sqliFindings,
     ...xssFindings,
+    ...extraSqliFindings,
+    ...extraXssFindings,
   ];
 
   const summary: ScanSummary = {
@@ -1404,5 +1489,6 @@ export async function runScan(targetUrl: string): Promise<ScanResult> {
     sslValid: mainFetch.sslValid ?? null,
     sslExpiry: mainFetch.sslExpiry ?? null,
     scannedAt: new Date().toISOString(),
+    crawlSummary,
   };
 }

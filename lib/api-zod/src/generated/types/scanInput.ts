@@ -9,4 +9,6 @@
 export interface ScanInput {
   /** The target URL to scan (must be a valid http/https URL) */
   url: string;
+  /** When true, the scanner first spiders the target domain to discover internal links, forms, and endpoints, then runs injection checks against all discovered URLs with query parameters. */
+  crawl_enabled?: boolean;
 }

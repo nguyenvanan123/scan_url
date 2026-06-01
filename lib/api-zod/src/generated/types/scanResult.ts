@@ -6,6 +6,7 @@
  * OpenAPI spec version: 0.1.0
  */
 import type { ScanFinding } from './scanFinding';
+import type { ScanResultCrawlSummary } from './scanResultCrawlSummary';
 import type { ScanResultSummary } from './scanResultSummary';
 
 export interface ScanResult {
@@ -21,4 +22,5 @@ export interface ScanResult {
   /** @nullable */
   sslExpiry?: string | null;
   scannedAt: string;
+  crawlSummary?: ScanResultCrawlSummary;
 }

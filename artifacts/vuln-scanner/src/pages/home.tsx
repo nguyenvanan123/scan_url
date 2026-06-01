@@ -6,7 +6,7 @@ import { Link, useLocation } from "wouter";
 import { formatDistanceToNow } from "date-fns";
 import {
   ShieldAlert, ShieldCheck, Activity, Target, Clock,
-  Trash2, AlertTriangle, Loader2, Scan
+  Trash2, AlertTriangle, Loader2, Scan, Globe2
 } from "lucide-react";
 import { useQueryClient } from "@tanstack/react-query";
 
@@ -50,6 +50,7 @@ export default function Home() {
   const [, setLocation] = useLocation();
   const { toast } = useToast();
   const queryClient = useQueryClient();
+  const [crawlEnabled, setCrawlEnabled] = useState(false);
 
   const { data: stats, isLoading: statsLoading } = useGetScanStats();
   const { data: scans, isLoading: scansLoading } = useListScans();
@@ -63,7 +64,7 @@ export default function Home() {
   });
 
   function onSubmit(values: z.infer<typeof scanFormSchema>) {
-    createScan.mutate({ data: { url: values.url } }, {
+    createScan.mutate({ data: { url: values.url, crawl_enabled: crawlEnabled } }, {
       onSuccess: (data) => {
         queryClient.invalidateQueries({ queryKey: getListScansQueryKey() });
         queryClient.invalidateQueries({ queryKey: getGetScanStatsQueryKey() });
@@ -125,6 +126,37 @@ export default function Home() {
               </form>
             </Form>
 
+            {/* Spider mode toggle */}
+            <div className="mt-3 flex items-center gap-2">
+              <button
+                type="button"
+                role="switch"
+                aria-checked={crawlEnabled}
+                onClick={() => setCrawlEnabled((v) => !v)}
+                disabled={isPending}
+                className={`relative inline-flex h-5 w-9 flex-shrink-0 cursor-pointer rounded-full border-2 border-transparent transition-colors duration-200 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-primary focus-visible:ring-offset-2 disabled:cursor-not-allowed disabled:opacity-50 ${
+                  crawlEnabled ? "bg-primary" : "bg-muted"
+                }`}
+              >
+                <span
+                  className={`pointer-events-none inline-block h-4 w-4 transform rounded-full bg-white shadow-lg ring-0 transition duration-200 ease-in-out ${
+                    crawlEnabled ? "translate-x-4" : "translate-x-0"
+                  }`}
+                />
+              </button>
+              <div className="flex items-center gap-1.5">
+                <Globe2 className={`h-3.5 w-3.5 ${crawlEnabled ? "text-primary" : "text-muted-foreground"}`} />
+                <span className={`text-xs font-mono ${crawlEnabled ? "text-foreground" : "text-muted-foreground"}`}>
+                  Spider Mode
+                </span>
+                {crawlEnabled && (
+                  <span className="text-[10px] font-mono text-muted-foreground">
+                    — crawls internal links first, then tests all discovered URLs for injection
+                  </span>
+                )}
+              </div>
+            </div>
+
             {/* Scanning progress indicator */}
             {isPending && (
               <div className="mt-4 space-y-2">
@@ -132,7 +164,9 @@ export default function Home() {
                   <div className="h-full w-1/3 bg-primary rounded-full scan-sweep" />
                 </div>
                 <p className="text-xs font-mono text-muted-foreground text-center">
-                  Initiating scan — you will be redirected automatically
+                  {crawlEnabled
+                    ? "Spidering site → discovering URLs → running injection checks…"
+                    : "Initiating scan — you will be redirected automatically"}
                 </p>
               </div>
             )}

@@ -85,7 +85,7 @@ router.post("/scans", async (req, res) => {
     return;
   }
 
-  const { url } = parseResult.data;
+  const { url, crawl_enabled } = parseResult.data;
 
   let parsedUrl: URL;
   try {
@@ -110,7 +110,7 @@ router.post("/scans", async (req, res) => {
   });
 
   try {
-    const result = await runScan(parsedUrl.toString());
+    const result = await runScan(parsedUrl.toString(), crawl_enabled ?? false);
     await db
       .update(scansTable)
       .set({ status: "completed", result, completedAt: new Date() })
