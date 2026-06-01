@@ -2,6 +2,7 @@ import https from "https";
 import http from "http";
 import dns from "dns/promises";
 import { URL } from "url";
+import { validateSensitiveFile, validateSqlInjection, validateXssReflection } from "./response-validator.js";
 
 export interface ScanFinding {
   id: string;
@@ -1034,8 +1035,13 @@ async function checkSensitiveFiles(baseUrl: string): Promise<ScanFinding[]> {
       try {
         const res = await fetchUrl(base + path, "GET", 5000);
         if (res.statusCode === 200 || res.statusCode === 206) {
+          const contentType = headerStr(res.headers["content-type"]);
+          const validation = validateSensitiveFile(path, res.statusCode, contentType, res.body);
+          if (!validation.isReal) {
+            return { found: false, falsePositive: true, path, reason: validation.reason };
+          }
           const snippet = res.body.slice(0, 300).trim();
-          return { label, severity, why, path, snippet, found: true };
+          return { label, severity, why, path, snippet, contentType, validation, found: true };
         }
       } catch {}
       return { found: false };
@@ -1045,8 +1051,9 @@ async function checkSensitiveFiles(baseUrl: string): Promise<ScanFinding[]> {
   let foundCount = 0;
   for (const r of results) {
     if (r.status === "fulfilled" && r.value.found) {
-      const { label, severity, why, path, snippet } = r.value as any;
+      const { label, severity, why, path, snippet, validation } = r.value as any;
       foundCount++;
+      const confidenceTag = validation?.confidence === "high" ? "" : ` [confidence: ${validation?.confidence ?? "medium"}]`;
       findings.push({
         id: `sensitive-${label.replace(/[^a-z0-9]/gi, "-")}`,
         category: "sensitive_files",
@@ -1054,7 +1061,11 @@ async function checkSensitiveFiles(baseUrl: string): Promise<ScanFinding[]> {
         severity,
         status: "fail",
         description: why,
-        detail: snippet ? `Path: ${path}\nPreview: ${snippet}` : `Path: ${path}`,
+        detail: [
+          `Path: ${path}${confidenceTag}`,
+          validation?.reason ? `Validated: ${validation.reason}` : null,
+          snippet ? `\nPreview:\n${snippet}` : null,
+        ].filter(Boolean).join("\n"),
         recommendation:
           severity === "critical"
             ? `Immediately block access to ${path} via your web server config. Remove any sensitive files from the web root. For .git/, add 'location /.git { deny all; }' (nginx) or 'RedirectMatch 404 /\\.git' (Apache). Rotate all credentials that may have been exposed.`
@@ -1137,10 +1148,14 @@ async function checkSqlInjection(targetUrl: string): Promise<ScanFinding[]> {
         for (const pattern of SQL_ERROR_PATTERNS) {
           const match = pattern.exec(body);
           if (match) {
+            // Secondary validation — filter documentation pages and false positives
+            const secondaryCheck = validateSqlInjection(match[0], body, payload);
+            if (!secondaryCheck.isReal) break; // suppressed as false positive
+
             if (!vulnerableParams.includes(param)) {
               vulnerableParams.push(param);
               const start = Math.max(0, match.index - 40);
-              evidenceMap[param] = `Payload: ${payload}\nError snippet: ...${body.slice(start, start + 200)}...`;
+              evidenceMap[param] = `Payload: ${payload}\nError snippet: ...${body.slice(start, start + 200)}...\nValidator: ${secondaryCheck.reason}`;
             }
             break;
           }
@@ -1256,11 +1271,15 @@ async function checkXss(targetUrl: string): Promise<ScanFinding[]> {
         if (!contentType.includes("html")) continue;
 
         if (pattern.test(res.body)) {
+          // Secondary validation — confirm payload is genuinely unescaped, not encoded
+          const secondaryCheck = validateXssReflection(payload, res.body);
+          if (!secondaryCheck.isReal) break; // suppressed as false positive
+
           if (!vulnerableParams.includes(param)) {
             vulnerableParams.push(param);
             const match = pattern.exec(res.body)!;
             const start = Math.max(0, match.index - 60);
-            evidenceMap[param] = `Payload: ${payload}\nReflected in response:\n...${res.body.slice(start, start + 250)}...`;
+            evidenceMap[param] = `Payload: ${payload}\nReflected in response:\n...${res.body.slice(start, start + 250)}...\nValidator: ${secondaryCheck.reason}`;
           }
           break;
         }
